@@ -1,3 +1,4 @@
+D
 
 <!DOCTYPE html>
 <html lang="en">
@@ -3898,8 +3899,7 @@ function unlockSection(id) { const el = document.getElementById(id); if (el) el.
 function accordionOpen(id, keepMarketOpen) { ["leagueSection", "fixtureSection", "marketSection", "teamASection", "teamBSection", "h2hSection"].forEach((s) => { if (s !== id && !(keepMarketOpen && s === "marketSection")) closeSection(s); }); openSection(id); }
 function updateSectionLocks() {
   const ids = ["fixtureSection", "marketSection", "teamASection", "teamBSection", "h2hSection"];
-  if (!curLeague()) { ids.forEach(lockSection); return; }
-  ids.forEach(unlockSection);
+  ids.forEach(unlockSection); /* BB never locks sections: every header toggles on tap, league or not */
 }
 
 /* ---------------- fresh-load snapshot: every wipe restores the page exactly to how it loaded ---------------- */
@@ -3910,7 +3910,7 @@ function ttFreshCapture() {
   const els = []; const known = new WeakSet();
   root.querySelectorAll("*").forEach((el) => known.add(el));
   root.querySelectorAll("[id]").forEach((el) => {
-    if (TT_WIPE_KEEP.has(el.id) || el.closest("#leagueSelect,#fixtureSelect")) return;
+    if (TT_WIPE_KEEP.has(el.id) || el.closest("#leagueSelect,#fixtureSelect") || el.classList.contains("section")) return; /* section open/locked/visible state is owned by the league flow, never by the snapshot */
     const leaf = !el.querySelector("[id]") && !/^(SELECT)$/.test(el.tagName);
     els.push({ el, v: "value" in el && !/^(BUTTON)$/.test(el.tagName) ? el.value : undefined, c: el.type === "checkbox" || el.type === "radio" ? el.checked : undefined, cls: el.className, st: el.getAttribute("style"), dis: el.disabled, h: leaf ? el.innerHTML : null, hid: el.hidden });
   });
@@ -3928,6 +3928,8 @@ function ttFreshRestore() {
     if (x.st == null) el.removeAttribute("style"); else if (el.getAttribute("style") !== x.st) el.setAttribute("style", x.st);
     el.disabled = x.dis; el.hidden = x.hid;
   });
+  const fs = document.getElementById("fixtureSection"); if (fs) { if (curLeague()) fs.style.display = ""; else fs.setAttribute("style", "display: none"); } /* Auto-Fetch stays visible while a league is picked (as in BB) */
+  updateSectionLocks();
 }
 /* ---------------- wipe on league switch ---------------- */
 function clearInputs() {
