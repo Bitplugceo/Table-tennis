@@ -4619,14 +4619,15 @@ function updateTrackerInsightsButton() {
 function setTrackerModalView(v) { g_trackerView = ["picks", "report", "debug", "config", "health"].includes(v) ? v : "picks"; renderTracker(); }
 const _pct = (w, l) => (w + l ? (w / (w + l)) * 100 : NaN);
 const formatPctTT = (v) => (isFinite(v) ? v.toFixed(1) + "%" : "NaN");
-function _rec(list) { list = list.filter((p) => !p.lean); /* diagnostic LEAN rows (NO PLAY by the engine) are shown but never counted in the record */ const w = list.filter((p) => p.resultStatus === "win").length, l = list.filter((p) => p.resultStatus === "loss").length, pu = list.filter((p) => p.resultStatus === "push").length; return { wins: w, losses: l, pushes: pu, settled: w + l + pu, winPct: _pct(w, l) }; }
+const _st = (p) => String((p && p.resultStatus) || "pending").toLowerCase();
+function _rec(list) { /* counts every tracked row, LEAN and PLAY alike (incl. early wins), using the same status normalisation as the table */ const w = list.filter((p) => _st(p) === "win").length, l = list.filter((p) => _st(p) === "loss").length, pu = list.filter((p) => _st(p) === "push").length; return { wins: w, losses: l, pushes: pu, settled: w + l + pu, winPct: _pct(w, l) }; }
 function _groupRows(list, keyFn) { const g = {}; list.forEach((p) => { const k = keyFn(p); if (k == null) return; (g[k] = g[k] || []).push(p); }); return Object.keys(g).map((k) => Object.assign({ label: k }, _rec(g[k]))).sort((a, b) => b.settled - a.settled); }
 function _table(head, rows, empty, cols) { return `<div class="table-wrap tracker-report-table-wrap"><table class="tracker-analytics-table"><thead><tr>${head}</tr></thead><tbody>${rows || `<tr><td colspan="${cols}" class="note">${empty}</td></tr>`}</tbody></table></div>`; }
 function _card(title, meta, body) { return `<div class="tracker-analytics-card"><div class="tracker-analytics-card-head"><div class="tracker-analytics-card-title">${title}</div><div class="tracker-analytics-card-meta">${meta}</div></div><div class="tracker-analytics-card-body">${body}</div></div>`; }
 const _wlHead = '<th class="num">Settled</th><th class="num">Wins</th><th class="num">Losses</th><th class="num">Pushes</th><th class="rate">Win rate</th>';
 const _wlRow = (r) => `<tr><td>${escapeHtml(r.label)}</td><td class="num">${r.settled}</td><td class="num">${r.wins}</td><td class="num">${r.losses}</td><td class="num">${r.pushes}</td><td class="rate">${formatPctTT(r.winPct)}</td></tr>`;
 function reportHtml() {
-  const all = g_tracker.picks, settledAll = all.filter((p) => ["win", "loss", "push"].includes(p.resultStatus)), at = _rec(settledAll);
+  const all = g_tracker.picks, settledAll = all.filter((p) => ["win", "loss", "push"].includes(_st(p))), at = _rec(settledAll);
   const cur = settledAll.filter((p) => p.build === TT_BUILD && p.resultStatus !== "push"), curRec = _rec(cur), active = all.filter((p) => p.resultStatus === "pending").length;
   const sorted = settledAll.slice().sort((a, b) => (a.eventDate || 0) - (b.eventDate || 0)); const cut = Math.floor(sorted.length * 0.7), test = sorted.slice(cut), testRec = _rec(test);
   const status = at.settled >= 50 ? (at.winPct >= 54.05 ? "ABOVE BREAK-EVEN" : "BELOW BREAK-EVEN") : "COLLECTING";
@@ -4690,7 +4691,7 @@ function configPageHtml() { return `<div class="tracker-analytics-shell"><div cl
 function renderTracker() {
   const body = document.getElementById("trackedPicksBody"), empty = document.getElementById("trackerEmpty"), panel = document.getElementById("trackerAnalyticsPanel"), sumEl = document.getElementById("trackerSummary");
   if (!body) return;
-  const all = g_tracker.picks, r = _rec(all), pend = all.filter((p) => p.resultStatus === "pending"), live = pend.filter((p) => g_liveGameStatus.has(String(p.eventId))).length;
+  const all = g_tracker.picks, r = _rec(all), pend = all.filter((p) => _st(p) === "pending"), live = pend.filter((p) => g_liveGameStatus.has(String(p.eventId))).length;
   sumEl.innerHTML = `<span id="trackerSummaryCounts">${live} live • ${pend.length - live} pending • ${r.wins} wins • ${r.losses} losses${r.pushes ? " • " + r.pushes + " pushes" : ""}</span>`;
   const fill = document.getElementById("enginePerfFill"), pctEl = document.getElementById("enginePerfPct"); if (fill) fill.style.width = (isFinite(r.winPct) ? Math.round(r.winPct) : 0) + "%"; if (pctEl) pctEl.textContent = isFinite(r.winPct) ? Math.round(r.winPct) + "%" : "NaN";
   syncTrackerModalView(); updateTrackerInsightsButton();
@@ -4701,7 +4702,7 @@ function renderTracker() {
   }
   panel.classList.add("tracker-hidden"); panel.style.display = "none"; panel.innerHTML = "";
   empty.style.display = all.length ? "none" : "block"; empty.textContent = "No tracked picks saved yet.";
-  body.innerHTML = all.slice(0, 200).map((p, i) => {
+  body.innerHTML = all.map((p, i) => {
     const st = String(p.resultStatus || "pending").toLowerCase(); const isLive = st === "pending" && g_liveGameStatus.has(String(p.eventId));
     const cls = st === "win" ? "track-win" : st === "loss" ? "track-loss" : st === "push" || st === "void" ? "track-push" : isLive ? "pred-noplay" : "track-pending";
     let sh;
