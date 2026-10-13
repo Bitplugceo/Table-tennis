@@ -4173,6 +4173,13 @@ function ttMix(fn, p, sig) { const W = TT_GH.reduce((s, x) => s + x[1], 0); let 
 function ttMixTotal(p, bo) { return ttMix((q) => ttMatchDist(q, bo), p, TTH.sigma); }
 function ttMixSet1(p) { return ttMix((q) => { const [A, B] = ttSetDist(Math.round(q * 2000) / 2000); const o = new Float64Array(A.length); for (let i = 0; i < A.length; i++) o[i] = A[i] + B[i]; return o; }, p, TTH.sigma); }
 function ttDistMean(d) { let s = 0; for (let i = 0; i < d.length; i++) s += i * d[i]; return s; }
+
+/* MODEL tt-pm-2026-10-13b: continuous fair line (where calibrated P(Over)=50%) instead of the whole-number median, and per-league
+   walk-forward calibration slope lambda that pulls the model's matchup deviation toward the league average (fixes the structural UNDER skew). */
+const TT_MODEL_VERSION = "tt-pm-2026-10-13b";
+const TT_CAL = { "Ukraine - Setka Cup": [0.5, 0.0], "Czechia - Setka Cup": [1.0, 1.0], "Moldova - Setka Cup": [1.0, 1.0], "International - TT Elite Series": [1.0, 0.3], "International - TT Cup": [0.0, 1.0], _default: [0.5, 0.5] }; /* same table as the worker (walk-forward, 25 days) */
+function ttFair(d, off) { let lo = 0, hi = d.length + Math.abs(off) + 5; for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; if (ttPOver(d, mid, off) > 0.5) lo = mid; else hi = mid; } return (lo + hi) / 2; }
+function ttCalOffsets(H, league) { const c = TT_CAL[league] || TT_CAL._default; const sT = isFiniteVal(H.muT) ? -(1 - c[0]) * (ttDistMean(H.dist) - H.muT) : 0, s1 = isFiniteVal(H.mu1) ? -(1 - c[1]) * (ttDistMean(H.d1) - H.mu1) : 0; return { offT: H.ot + sT, off1: H.o1 + s1, lamT: c[0], lam1: c[1], sT, s1 }; }
 function ttDistMedian(d) { let c = 0; for (let i = 0; i < d.length; i++) { c += d[i]; if (c >= 0.5) return i; } return d.length - 1; }
 function ttPOver(d, line, off) { let c = 0; const cdf = new Float64Array(d.length); for (let i = 0; i < d.length; i++) { c += d[i]; cdf[i] = c; } const y = line - off - 0.5; if (y < 0) return 1; if (y >= d.length - 1) return 0; const fl = Math.floor(y), fr = y - fl; return 1 - (cdf[fl] * (1 - fr) + cdf[fl + 1] * fr); }
 const g_ttMeanGrid = {};
@@ -4193,7 +4200,7 @@ function ttHidden(list, bo, nameA, nameB, nowMs) {
     return { d, eff }; };
   for (const m of same) {
     const a = normName(m.h), b = normName(m.a); const ptsA = m.sets.reduce((s, x) => s + x[0], 0), tot = m.total;
-    if ((cnt.get(a) || 0) >= TTH.minPrior && (cnt.get(b) || 0) >= TTH.minPrior) { const p = sigm(dlogOf(a, b, m.t).d / 2); const mu = ttMeanAt(p, bo); res.push([tot - mu.tot, m.set1 - mu.s1]); if (res.length > TTH.offWin) res.shift(); }
+    if ((cnt.get(a) || 0) >= TTH.minPrior && (cnt.get(b) || 0) >= TTH.minPrior) { const p = sigm(dlogOf(a, b, m.t).d / 2); const mu = ttMeanAt(p, bo); res.push([tot - mu.tot, m.set1 - mu.s1, mu.tot, mu.s1]); if (res.length > TTH.offWin) res.shift(); }
     const pk = pkey(a, b) + "|" + day(m.t); pairDay.set(pk, (pairDay.get(pk) || 0) + 1); const cw = 1 / pairDay.get(pk);
     const [rA, nA] = rat(a, m.t), [rB, nB] = rat(b, m.t); const sA = Math.min(0.75, Math.max(0.25, ptsA / tot)); const g = TTH.K * cw * (logit(sA) * 2 - (rA - rB)) / 2;
     R.set(a, { r: rA + g, n: nA + cw, t: m.t }); R.set(b, { r: rB - g, n: nB + cw, t: m.t });
@@ -4207,7 +4214,7 @@ function ttHidden(list, bo, nameA, nameB, nowMs) {
   const prof = (P) => { const s = (setOneHist.get(P) || []).slice(-TTH.s1Last); return s.length && isFiniteVal(l1) ? (mean(s) - l1) * s.length / (s.length + TTH.s1N0) : 0; };
   const o1f = o1 + TTH.set1Prof * (prof(A) + prof(B));
   const [rA, nA] = rat(A, nowMs), [rB, nB] = rat(B, nowMs);
-  return { p, dlog: d, h2hEff: eff, rA, rB, nA, nB, ot, o1: o1f, s1prof: TTH.set1Prof * (prof(A) + prof(B)), offN: res.length, offSrc: "loaded history", pool: same.length, dist: ttMixTotal(p, bo), d1: ttMixSet1(p), A: nameA, B: nameB, bo };
+  return { p, dlog: d, h2hEff: eff, rA, rB, nA, nB, ot, o1: o1f, muT: res.length ? mean(res.map((x) => x[2])) : NaNv, mu1: res.length ? mean(res.map((x) => x[3])) : NaNv, s1prof: TTH.set1Prof * (prof(A) + prof(B)), offN: res.length, offSrc: "loaded history", pool: same.length, dist: ttMixTotal(p, bo), d1: ttMixSet1(p), A: nameA, B: nameB, bo };
 }
 
 /* ---------------- run ---------------- */
@@ -4225,8 +4232,11 @@ function effectiveEdge(L, market) {
   const base = market === "ft" ? L.minEdgeTotal : L.minEdgeSet1; if (!isFiniteVal(base)) return base;
   const w = g_ttThresh && g_ttThresh.thresholds && g_ttThresh.thresholds.leagues && g_ttThresh.thresholds.leagues[L.league];
   const v = w && w[market === "ft" ? "238" : "247"] && w[market === "ft" ? "238" : "247"].v;
-  return isFiniteVal(v) && v > 0 ? Number(v) : base;
+  const floor = TT_EDGE_FLOOR[L.league + "|" + market]; const eff = isFiniteVal(v) && v > 0 ? Number(v) : base;
+  return isFiniteVal(floor) ? Math.max(floor, eff) : eff;
 }
+/* 13 Oct 2026 diagnosis: Ukraine Setka totals had a structural UNDER skew (46 U vs 5 O qualifying at edge 2, UNDER hit 50% proxy / 38% on real lines). Raised until real-line evidence says otherwise. */
+const TT_EDGE_FLOOR = { "Ukraine - Setka Cup|ft": 8.0, "Ukraine - Setka Cup|h1": 2.5, "Czechia - Setka Cup|ft": 8.0, "Czechia - Setka Cup|h1": 2.5, "Moldova - Setka Cup|ft": 8.0, "Moldova - Setka Cup|h1": 2.5 }; /* model b: no walk-forward threshold reaches 55% side-balanced on Setka */
 function evaluate(market, L, model, line, ctx) {
   const T = L; const cap = market === "ft" ? TT_CONFIG.sanityCapTotal : TT_CONFIG.sanityCapSet1;
   const minEdge = effectiveEdge(T, market);
@@ -4236,8 +4246,8 @@ function evaluate(market, L, model, line, ctx) {
   if (line < bounds[0] || line > bounds[1]) return noPlay(market, line, NaNv, "Line " + line + " is outside the sane range for this market (" + bounds.join("–") + ").");
   let proj, pOver;
   const H = model.hidden;
-  if (H && market === "ft") { if (!isFiniteVal(H.ot)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); proj = ttDistMedian(H.dist) + H.ot; pOver = ttPOver(H.dist, line, H.ot); }
-  else if (H) { if (!isFiniteVal(H.o1)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); proj = ttDistMedian(H.d1) + H.o1; pOver = ttPOver(H.d1, line, H.o1); }
+  if (H && market === "ft") { if (!isFiniteVal(H.ot)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); const C = ttCalOffsets(H, L.league); proj = ttFair(H.dist, C.offT); pOver = ttPOver(H.dist, line, C.offT); }
+  else if (H) { if (!isFiniteVal(H.o1)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); const C = ttCalOffsets(H, L.league); proj = ttFair(H.d1, C.off1); pOver = ttPOver(H.d1, line, C.off1); }
   else if (market === "ft") { if (!model.comps.length) return noPlay(market, line, NaNv, "League set-count distribution too thin."); proj = fairLineMix(model.comps); pOver = pOverMix(model.comps, line); }
   else { proj = model.s1; pOver = 1 - normCdf((line - proj) / model.s1sd); }
   if (!isFiniteVal(proj) || !isFiniteVal(pOver)) return noPlay(market, line, NaNv, "Projection not finite.");
@@ -4294,8 +4304,8 @@ function explainDetails(p, L, nameA, nameB) {
   const m = p.model; const lines = [p.reason];
   if (m) {
     if (m.hidden) lines.push(`Point model: P(${nameA} wins a point) ${fmtPct(m.hidden.p)}; exact set-length distribution; league offset ${fmt1(m.hidden.ot)} total / ${fmt1(m.hidden.o1)} set 1 from ${m.hidden.offN} matches (${m.hidden.offSrc || "loaded history"}).`); else lines.push("Point model unavailable (stats typed manually) — fallback set-share model used.");
-    const Hm = m.hidden, s1Shown = Hm ? (isFiniteVal(Hm.o1) ? ttDistMedian(Hm.d1) + Hm.o1 : NaNv) : m.s1, totShown = Hm && isFiniteVal(Hm.ot) ? ttDistMedian(Hm.dist) + Hm.ot : NaNv;
-    if (Hm) lines.push(`Point-model projections (used for the pick): total ${fmt1(totShown)} = median ${fmt1(ttDistMedian(Hm.dist))} + offset ${fmt1(Hm.ot)}; set 1 ${fmt1(s1Shown)} = median ${fmt1(ttDistMedian(Hm.d1))} + offset ${fmt1(Hm.o1)}.`);
+    const Hm = m.hidden, Cm = Hm ? ttCalOffsets(Hm, (L && L.league) || "") : null, s1Shown = Hm ? (isFiniteVal(Hm.o1) ? ttFair(Hm.d1, Cm.off1) : NaNv) : m.s1, totShown = Hm && isFiniteVal(Hm.ot) ? ttFair(Hm.dist, Cm.offT) : NaNv;
+    if (Hm) lines.push(`Point-model projections (used for the pick, model ${TT_MODEL_VERSION}): total ${fmt1(totShown)} = calibrated fair line (offset ${fmt1(Hm.ot)}, matchup pull ${fmt1(Cm.sT)}, slope ${Cm.lamT}); set 1 ${fmt1(s1Shown)} = calibrated fair line (offset ${fmt1(Hm.o1)}, matchup pull ${fmt1(Cm.s1)}, slope ${Cm.lam1}).`);
     lines.push(`${Hm ? "Set-share cross-check (not used for the pick): " : ""}Set-win strength ${nameA} ${fmtPct(m.sA)} vs ${nameB} ${fmtPct(m.sB)} → P(${nameA} wins a set) ${fmtPct(m.p)}.`);
     lines.push((Hm ? "Cross-check set-count probabilities: " : "Set-count probabilities: ") + Object.keys(m.sc).map((k) => k + " sets " + fmtPct(m.sc[k])).join(", ") + ".");
     lines.push(`Points-per-set adjustment ${fmt1(m.adj)} per set; set 1 projection ${fmt1(s1Shown)} (league ${L ? L.avgSet1 : "NaN"}).`);
@@ -4342,7 +4352,7 @@ function trackPicks(list, lg, A, B) {
   list.forEach((p) => {
     const sig = f.eventId + "|" + p.marketKey;
     if (g_tracker.picks.some((x) => x.signature === sig)) return;
-    g_tracker.picks.unshift({ signature: sig, eventId: f.eventId, leagueKey: lg.key, league: lg.name, bo: AppState.bo, homeTeam: A, awayTeam: B, pairKey: [normName(A), normName(B)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.marketKey, market: TT_MARKETS[p.marketKey].label, line: p.line, side: p.side, pick: p.pick, grade: p.grade, proj: Math.round(p.proj * 10) / 10, edge: Math.round(p.edge * 10) / 10, prob: isFiniteVal(p.pSide) ? Math.round(p.pSide * 1000) / 1000 : NaNv, resultStatus: "pending", actual: NaNv, build: TT_BUILD });
+    g_tracker.picks.unshift({ signature: sig, eventId: f.eventId, leagueKey: lg.key, league: lg.name, bo: AppState.bo, homeTeam: A, awayTeam: B, pairKey: [normName(A), normName(B)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.marketKey, mv: TT_MODEL_VERSION, market: TT_MARKETS[p.marketKey].label, line: p.line, side: p.side, pick: p.pick, grade: p.grade, proj: Math.round(p.proj * 10) / 10, edge: Math.round(p.edge * 10) / 10, prob: isFiniteVal(p.pSide) ? Math.round(p.pSide * 1000) / 1000 : NaNv, resultStatus: "pending", actual: NaNv, build: TT_BUILD });
   });
   trackerSave(); renderTracker(); syncPicksToWorker();
 }
@@ -4473,7 +4483,7 @@ async function triggerTrackerMilitaryRaid() {
     await runStage("reconcile buckets", () => { ttReconcileBuckets(); report.bucketsReconciled = true; });
     await Promise.all([
       runStage("purge zombie storage", async () => { report.zombieKeysPurged = ttPurgeZombieKeys(); }),
-      runStage("force-settle + live sync", async () => { const pb = countPending(); await Promise.all([autoSettle(true), pollLiveGameClocks()]); report.settledThisPass = Math.max(0, pb - countPending()); report.liveGamesSynced = g_liveGameStatus.size; }, 60000),
+      runStage("force-settle + live sync", async () => { const pb = countPending(); await pullWorkerPicks(); await Promise.all([autoSettle(true), pollLiveGameClocks()]); report.settledThisPass = Math.max(0, pb - countPending()); report.liveGamesSynced = g_liveGameStatus.size; }, 60000),
     ]);
     await runStage("archive sweep", () => { report.archivedThisPass = 0; }); /* TT keeps one bucket: nothing to archive */
     await runStage("force save (local + server)", async () => { trackerSave(); syncPicksToWorker(); }, 120000);
@@ -4489,6 +4499,24 @@ async function triggerTrackerMilitaryRaid() {
     return report;
   } catch (fatalErr) { raidLog("raid_fatal", { error: fatalErr && fatalErr.message || String(fatalErr) }); setStatus("RAID FAILED ⚠️", "#ff6b6b"); setTimeout(() => setStatus("", ""), 2400); return null; }
   finally { g_militaryRaidInFlight = false; }
+}
+
+/* worker-logged picks (diag batch + pre-start cron) are merged into Tracked Picks so they show on every device and auto-settle */
+async function pullWorkerPicks() {
+  try {
+    const key = (() => { try { return localStorage.getItem("TT_SYNC_KEY") || ""; } catch (_e) { return ""; } })();
+    const r = await fetch(TT_WORKER_URL + "/tt/picks?_=" + Date.now(), { cache: "no-store", headers: key ? { "X-TT-Key": key } : {} }); const j = await r.json(); if (!j || !j.ok) return 0;
+    const have = new Map(g_tracker.picks.map((p) => [p.signature, p])); let added = 0, upd = 0;
+    (j.rows || []).forEach((x) => {
+      if (!x.src) return; const mk = x.mk === "238" ? "ft" : "h1"; const ex = have.get(x.sig);
+      if (ex) { if (ex.src === x.src && ex.resultStatus === "pending" && x.status && x.status !== "pending") { ex.resultStatus = x.status; ex.actual = isFiniteVal(x.actual) ? x.actual : NaNv; ex.settledAt = x.settled || Date.now(); upd++; } return; }
+      const lean = x.play === false;
+      g_tracker.picks.push({ signature: x.sig, eventId: x.id, leagueKey: "", league: x.lg, bo: x.bo, homeTeam: x.h || "Player A", awayTeam: x.a || "Player B", pairKey: [normName(x.h || ""), normName(x.a || "")].sort().join("|"), eventDate: x.start, createdAt: x.created, marketKey: mk, market: TT_MARKETS[mk].label, line: x.line, side: x.side, pick: (lean ? "LEAN " : "") + x.side + " " + x.line, grade: lean ? "LEAN" : "PLAY", proj: x.proj, edge: x.edge, lean, src: x.src, mv: x.mv, resultStatus: x.status || "pending", actual: isFiniteVal(x.actual) ? x.actual : NaNv, synced: true });
+      added++;
+    });
+    if (added || upd) { g_tracker.picks.sort((a, b) => b.eventDate - a.eventDate); trackerSave(); renderTracker(); }
+    return added;
+  } catch (e) { reportSoftFailure("worker-picks-pull", e); return 0; }
 }
 function configText() { return Object.values(TT_LEAGUE_DATA.leagues).map((d) => [d.league, "bo" + d.bestOf, "n=" + d.n, d.tier, d.minEdgeTotal, d.minEdgeSet1].join(" | ")).join("\n"); }
 function changeLogHtml() {
@@ -4591,7 +4619,7 @@ function updateTrackerInsightsButton() {
 function setTrackerModalView(v) { g_trackerView = ["picks", "report", "debug", "config", "health"].includes(v) ? v : "picks"; renderTracker(); }
 const _pct = (w, l) => (w + l ? (w / (w + l)) * 100 : NaN);
 const formatPctTT = (v) => (isFinite(v) ? v.toFixed(1) + "%" : "NaN");
-function _rec(list) { const w = list.filter((p) => p.resultStatus === "win").length, l = list.filter((p) => p.resultStatus === "loss").length, pu = list.filter((p) => p.resultStatus === "push").length; return { wins: w, losses: l, pushes: pu, settled: w + l + pu, winPct: _pct(w, l) }; }
+function _rec(list) { list = list.filter((p) => !p.lean); /* diagnostic LEAN rows (NO PLAY by the engine) are shown but never counted in the record */ const w = list.filter((p) => p.resultStatus === "win").length, l = list.filter((p) => p.resultStatus === "loss").length, pu = list.filter((p) => p.resultStatus === "push").length; return { wins: w, losses: l, pushes: pu, settled: w + l + pu, winPct: _pct(w, l) }; }
 function _groupRows(list, keyFn) { const g = {}; list.forEach((p) => { const k = keyFn(p); if (k == null) return; (g[k] = g[k] || []).push(p); }); return Object.keys(g).map((k) => Object.assign({ label: k }, _rec(g[k]))).sort((a, b) => b.settled - a.settled); }
 function _table(head, rows, empty, cols) { return `<div class="table-wrap tracker-report-table-wrap"><table class="tracker-analytics-table"><thead><tr>${head}</tr></thead><tbody>${rows || `<tr><td colspan="${cols}" class="note">${empty}</td></tr>`}</tbody></table></div>`; }
 function _card(title, meta, body) { return `<div class="tracker-analytics-card"><div class="tracker-analytics-card-head"><div class="tracker-analytics-card-title">${title}</div><div class="tracker-analytics-card-meta">${meta}</div></div><div class="tracker-analytics-card-body">${body}</div></div>`; }
@@ -4741,7 +4769,7 @@ function boot() {
   ttFreshCapture();
   trackerLoad();
   const modal = document.getElementById("trackerModal");
-  const openT = () => { g_trackerView = "picks"; renderTracker(); modal.classList.add("open"); modal.setAttribute("aria-hidden", "false"); document.body.classList.add("tracker-open"); autoSettle(); scheduleLiveClockPoll(0); };
+  const openT = () => { g_trackerView = "picks"; renderTracker(); modal.classList.add("open"); modal.setAttribute("aria-hidden", "false"); document.body.classList.add("tracker-open"); pullWorkerPicks().then(() => autoSettle()); scheduleLiveClockPoll(0); };
   const closeT = () => { modal.classList.remove("open"); modal.setAttribute("aria-hidden", "true"); document.body.classList.remove("tracker-open"); };
   document.getElementById("trackerToggleBtn").addEventListener("click", openT);
   document.getElementById("trackerCloseBtn").addEventListener("click", closeT);
@@ -4767,11 +4795,11 @@ function boot() {
   document.getElementById("trackerDeleteCancelBtn").addEventListener("click", () => { conf.classList.remove("open"); conf.setAttribute("aria-hidden", "true"); });
   document.getElementById("trackerDeleteOkBtn").addEventListener("click", () => { if (delIdx >= 0) { g_tracker.picks.splice(delIdx, 1); trackerSave(); renderTracker(); } conf.classList.remove("open"); conf.setAttribute("aria-hidden", "true"); });
   renderTracker();
-  setInterval(autoSettle, 5 * 60000);
+  setInterval(() => pullWorkerPicks().then(() => autoSettle()), 5 * 60000); pullWorkerPicks();
   scheduleLiveClockPoll(0); /* BB: live poll starts at boot and re-arms itself every 28 s */
   document.addEventListener("visibilitychange", () => { if (!document.hidden && g_tracker.picks.some((p) => p.resultStatus === "pending")) scheduleLiveClockPoll(0); });
   window.__BETCEO_ENGINE_BOOT_SEEN = true;
-  window.TT = { clearInputs, runEngine, fetchStats, fetchLines, loadFixtures, AppState, TT_LEAGUES, TT_CONFIG, computeModel, loadHistory, g_tracker: () => g_tracker, g_liveGameStatus, pollLiveGameClocks, renderTracker, triggerTrackerMilitaryRaid };
+  window.TT = { clearInputs, runEngine, fetchStats, fetchLines, loadFixtures, AppState, TT_LEAGUES, TT_CONFIG, computeModel, loadHistory, g_tracker: () => g_tracker, pullWorkerPicks, g_liveGameStatus, pollLiveGameClocks, renderTracker, triggerTrackerMilitaryRaid };
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 
