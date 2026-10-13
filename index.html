@@ -1,4 +1,3 @@
-S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -3238,14 +3237,7 @@ body.dark-mode .tracker-analytics-section-head {
 
 
 
-  <div class="section" id="sportyLinesSection">
-    <h3>Market Line Lookup <span class="autofill-indicator" id="marketLinesOnlyTag">EDGE + THRESHOLD ONLY</span></h3>
-    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-      <button id="sportyFetchBtn" type="button" style="background:#2f8f4a !important;color:#fff !important;border:none !important;font-weight:800 !important;padding:10px 18px !important;border-radius:6px !important;cursor:pointer !important;box-shadow:0 2px 8px rgba(47,143,74,.35) !important">Fetch Market Lines</button>
-      <span id="sportyStatus" style="font-size:12px;opacity:.85">Find the fixture and fill market line fields only.</span>
-      <select id="sportyPick" style="display:none;max-width:100%;font-size:12px" aria-label="Choose fixture for market-line lookup"></select>
-    </div>
-  </div>
+  
 
 
 
@@ -3821,11 +3813,17 @@ function fromSporty(e, leagueName) {
 /* ---------------- history loading (per league; never mixes leagues) ---------------- */
 function utcDateStr(ms) { const d = new Date(ms); return d.getUTCFullYear() + "-" + String(d.getUTCMonth() + 1).padStart(2, "0") + "-" + String(d.getUTCDate()).padStart(2, "0"); }
 function srUtidsOf(lg) { return lg.tids.map((t) => String(t).replace("sr:tournament:", "")).filter((x) => /^\d{1,7}$/.test(x)); }
-async function loadHistory(lg, days, players) {
-  const out = new Map(); const errs = [];
+let g_ttOffsets = null;
+async function workerOffsets() { if (g_ttOffsets && Date.now() - g_ttOffsets.t < 30 * 60000) return g_ttOffsets.d; try { const j = await fetchJson(TT_WORKER_URL + "/tt/offsets", "Offsets(TT worker)", 30 * 60000, 10000); if (j && j.ok) g_ttOffsets = { t: Date.now(), d: j }; } catch (_e) {} return g_ttOffsets ? g_ttOffsets.d : null; }
+async function loadHistory(lg, days, players, onProgress) {
+  const out = new Map(); const errs = []; const prog = typeof onProgress === "function" ? onProgress : () => {};
+  const nP = (n) => { const k = normName(n); let c = 0; out.forEach((m) => { if (normName(m.h) === k || normName(m.a) === k) c++; }); return c; };
+  const enough = () => Array.isArray(players) && players.length === 2 && players.every((n) => nP(n) >= TT_CONFIG.lastN);
+  const stat = (src) => prog(src + " · " + out.size + " matches · " + (players || []).map((n) => n + " " + Math.min(nP(n), TT_CONFIG.lastN) + "/" + TT_CONFIG.lastN).join(" · "));
+  const end = Math.floor(Date.now() / 300000) * 300000, start = end - days * 86400000; /* 5-min buckets so the session cache is reused */
+  const jobs = [workerOffsets()];
   const utids = srUtidsOf(lg);
   if (lg.gismo && utids.length) {
-    const jobs = [];
     for (let i = 0; i <= days; i++) {
       const ds = utcDateStr(Date.now() - i * 86400000);
       jobs.push(gismo("sport_matches/20/" + ds + "/0", i === 0 ? 60000 : 6 * 3600000).then((d) => {
@@ -3833,29 +3831,30 @@ async function loadHistory(lg, days, players) {
           if (!utids.includes(String(t._utid))) return;
           (t.matches || []).forEach((m) => { const r = fromGismo(m, lg.name); if (r) out.set(r.id, r); });
         }));
+        stat("Sportradar");
       }).catch((e) => errs.push(String(e.message || e))));
     }
-    await Promise.all(jobs);
   }
-  if (!out.size || !lg.gismo) { /* fast path: results already ingested + validated by the tt-engine worker cron (one request) */
-    try {
-      const j = await fetchJson(TT_WORKER_URL + "/tt/results?league=" + encodeURIComponent(lg.name) + "&days=" + (days + 1), "Results(TT worker)", 120000, 20000);
-      Object.entries((j && j.rows) || {}).forEach(([id, x]) => { if (!Array.isArray(x) || x[0] !== lg.name) return; const r = finishMatch({ id, t: Number(x[3]), lg: lg.name, h: x[1], a: x[2], sets: (x[5] || []).map((q) => [Number(q[0]), Number(q[1])]), bo: Number(x[4]) }); if (r && Date.now() - r.t <= days * 86400000) out.set(id, r); });
-    } catch (e) { errs.push("worker results: " + String(e.message || e)); }
-  }
-  const _cnt = (n) => [...out.values()].filter((m) => normName(m.h) === normName(n) || normName(m.a) === normName(n)).length;
-  const _short = out.size < (lg.gismo ? 50 : 800) || (Array.isArray(players) && players.some((n) => _cnt(n) < TT_CONFIG.lastN));
-  if (_short && (!lg.gismo || !out.size || out.size < 50)) { /* worker store thin for these players: page the SportyBet results feed too and merge */
-    try {
-      const end = Date.now(); const start = end - days * 86400000;
-      for (let page = 1; page <= 40; page++) {
-        const d = await sportyTT("results?start=" + start + "&end=" + end + "&page=" + page + "&tids=" + encodeURIComponent(lg.tids.join(",")), 120000);
-        let n = 0;
-        (d.tournaments || []).forEach((t) => (t.events || []).forEach((e) => { n++; const c = e.sport && e.sport.category; const nm = normLeagueName((c && c.name) + " - " + (c && c.tournament && c.tournament.name)); if (nm !== lg.name) return; const r = fromSporty(e, lg.name); if (r) out.set(r.id, r); }));
-        if (!n || page * 100 >= (d.totalNum || 0)) break;
-      }
-    } catch (e) { errs.push(String(e.message || e)); }
-  }
+  /* worker store (one request, already validated by the cron) — always in parallel */
+  jobs.push(fetchJson(TT_WORKER_URL + "/tt/results?league=" + encodeURIComponent(lg.name) + "&days=" + (days + 1), "Results(TT worker)", 10 * 60000, 20000).then((j) => {
+    Object.entries((j && j.rows) || {}).forEach(([id, x]) => { if (!Array.isArray(x) || x[0] !== lg.name) return; const r = finishMatch({ id, t: Number(x[3]), lg: lg.name, h: x[1], a: x[2], sets: (x[5] || []).map((q) => [Number(q[0]), Number(q[1])]), bo: Number(x[4]) }); if (r && Date.now() - r.t <= days * 86400000) out.set(id, r); });
+    stat("Worker results");
+  }).catch((e) => errs.push("worker results: " + String(e.message || e))));
+  /* SportyBet results feed: pages in parallel batches, stop as soon as both players have >= lastN valid games */
+  const sportyPages = async () => {
+    let total = Infinity;
+    const page = async (pg) => { const d = await sportyTT("results?start=" + start + "&end=" + end + "&page=" + pg + "&tids=" + encodeURIComponent(lg.tids.join(",")), 10 * 60000); total = Math.min(total, d.totalNum || 0);
+      (d.tournaments || []).forEach((t) => (t.events || []).forEach((e) => { const c = e.sport && e.sport.category; const nm = normLeagueName((c && c.name) + " - " + (c && c.tournament && c.tournament.name)); if (nm !== lg.name) return; const r = fromSporty(e, lg.name); if (r) out.set(r.id, r); })); };
+    const T0 = Date.now();
+    for (let p0 = 1; p0 <= 40; p0 += 8) {
+      if (enough() || (p0 - 1) * 100 >= total || (p0 > 1 && Date.now() - T0 > 3500)) break; /* time budget: never page past ~5 s */
+      const before = out.size; const batch = []; for (let pg = p0; pg < p0 + 8 && (pg - 1) * 100 < total; pg++) batch.push(page(pg).catch((e) => errs.push(String(e.message || e))));
+      await Promise.all(batch); stat("SportyBet results page " + Math.min(p0 + 7, 40));
+      if (p0 > 1 && out.size === before) break; /* feed adds nothing new (players simply have few games) */
+    }
+  };
+  if (!lg.gismo) jobs.push(sportyPages());
+  await Promise.all(jobs);
   const list = [...out.values()].sort((x, y) => y.t - x.t);
   return { list, errs };
 }
@@ -3903,16 +3902,42 @@ function updateSectionLocks() {
   ids.forEach(unlockSection);
 }
 
+/* ---------------- fresh-load snapshot: every wipe restores the page exactly to how it loaded ---------------- */
+let g_ttFresh = null;
+const TT_WIPE_KEEP = new Set(["leagueSelect", "fixtureSelect"]);
+function ttFreshCapture() {
+  const root = document.querySelector(".wrapper"); if (!root) return;
+  const els = []; const known = new WeakSet();
+  root.querySelectorAll("*").forEach((el) => known.add(el));
+  root.querySelectorAll("[id]").forEach((el) => {
+    if (TT_WIPE_KEEP.has(el.id) || el.closest("#leagueSelect,#fixtureSelect")) return;
+    const leaf = !el.querySelector("[id]") && !/^(SELECT)$/.test(el.tagName);
+    els.push({ el, v: "value" in el && !/^(BUTTON)$/.test(el.tagName) ? el.value : undefined, c: el.type === "checkbox" || el.type === "radio" ? el.checked : undefined, cls: el.className, st: el.getAttribute("style"), dis: el.disabled, h: leaf ? el.innerHTML : null, hid: el.hidden });
+  });
+  g_ttFresh = { root, els, known };
+}
+function ttFreshRestore() {
+  if (!g_ttFresh) return;
+  g_ttFresh.root.querySelectorAll("[data-tt-dyn]").forEach((el) => el.remove()); /* any engine-inserted note */
+  g_ttFresh.els.forEach((x) => {
+    const el = x.el;
+    if (x.h != null && el.innerHTML !== x.h) el.innerHTML = x.h;
+    if (x.v !== undefined && el.value !== x.v) el.value = x.v;
+    if (x.c !== undefined) el.checked = x.c;
+    if (el.className !== x.cls) el.className = x.cls;
+    if (x.st == null) el.removeAttribute("style"); else if (el.getAttribute("style") !== x.st) el.setAttribute("style", x.st);
+    el.disabled = x.dis; el.hidden = x.hid;
+  });
+}
 /* ---------------- wipe on league switch ---------------- */
 function clearInputs() {
   window.__ttMatchGen = (window.__ttMatchGen || 0) + 1; /* MATCH-WIPE: in-flight fetches for the previous match must not land */
+  ttFreshRestore();
   ["teamAName", "teamBName", "ftMarket", "h1Market", "aFTH2H", "bFTH2H", "a1GH2H", "b1GH2H"].forEach((id) => setVal(id, ""));
   ["a", "b"].forEach((s) => PLAYER_FIELDS.forEach((f) => setVal(s + f, "")));
   ["useFTH2H", "use1GH2H"].forEach((id) => { const el = document.getElementById(id); if (el) el.checked = false; });
-  ["mAutoTag", "aAutoTag", "bAutoTag", "h2hAutoTag"].forEach((id) => setTag(id, false));
   ["aIntegrityTag", "bIntegrityTag"].forEach((id) => { const el = document.getElementById(id); if (el) el.textContent = ""; });
   ["fetchStatus", "marketAutoStatus", "last10SeriesAlert"].forEach((id) => setStatus(id, ""));
-  setStatus("sportyStatus", "Find the fixture and fill market line fields only.");
   const t = document.getElementById("results"); if (t) { t.style.display = "none"; t.innerHTML = "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>"; }
   AppState.fixture = null; AppState.bo = NaNv; AppState.h2hSets = null; AppState.lastFetch = null; AppState.sportyEvent = null; AppState.hidden = null;
 }
@@ -3992,7 +4017,7 @@ async function fetchStats() {
   const btn = document.getElementById("fetchBtn"); btn.disabled = true; const _gen = window.__ttMatchGen || 0; const stale = () => (window.__ttMatchGen || 0) !== _gen;
   fetchSpin("Loading " + TT_CONFIG.historyDays + " days of " + lg.name + " results...");
   try {
-    const { list, errs } = await loadHistory(lg, TT_CONFIG.historyDays, [A, B]);
+    const { list, errs } = await loadHistory(lg, TT_CONFIG.historyDays, [A, B], (msg) => { if (!stale()) fetchSpin("Loading history… " + msg); });
     if (stale()) { engineDebug("stats for " + A + " v " + B + " discarded (match changed while loading)"); return; }
     if (!list.length) { fetchDone("❌ No results available for " + lg.name + ". " + [...new Set(errs.map((x) => x.replace(/\(not JSON.*$/, "(blocked)")))].join("; ") + " → NO PLAY until stats load or are typed in.", true); return; }
     fetchSpin("Building last-" + TT_CONFIG.lastN + " for " + A + " and " + B + "...");
@@ -4018,7 +4043,7 @@ async function fetchStats() {
     setTag("h2hAutoTag", h2.length > 0);
     fetchSpin("Scanning H2H...");
     AppState.lastFetch = { at: now, league: lg.key, bo, A, B, nA: pa.length, nB: pb.length, nH2H: h2.length, pool: same.length };
-    try { AppState.hidden = Object.assign(ttHidden(list, bo, A, B, now), { league: lg.key }); } catch (e) { AppState.hidden = null; reportSoftFailure("hidden-model", e); }
+    try { const H = ttHidden(list, bo, A, B, now); if (!isFiniteVal(H.ot) && g_ttOffsets && g_ttOffsets.d && g_ttOffsets.d.offsets) { const W = g_ttOffsets.d.offsets[lg.name + "|" + bo]; if (W && W.n >= TTH.offMin) { H.ot = W.ot; H.o1 = W.o1 + (H.s1prof || 0); H.offN = W.n; H.offSrc = "tt-engine worker (all ingested matches)"; } } AppState.hidden = Object.assign(H, { league: lg.key }); } catch (e) { AppState.hidden = null; reportSoftFailure("hidden-model", e); }
     const sameDayH2H = AppState.h2hSets.filter((x) => x.day === Math.floor((now + 3600000) / 86400000)).length;
     const _short = pa.length < TT_CONFIG.minGames || pb.length < TT_CONFIG.minGames;
     fetchDone((_short ? "⚠️ FETCH INCOMPLETE: " + A + " has " + pa.length + ", " + B + " has " + pb.length + " games (needs " + TT_CONFIG.minGames + " each) → NO PLAY. " : "✅ ") + `H2H: ${h2.length} meeting(s)${sameDayH2H ? " (" + sameDayH2H + " today — correlated)" : ""} • ${lg.name} (best of ${bo}): ${same.length} valid matches in ${TT_CONFIG.historyDays}d • ${A} ${pa.length} games • ${B} ${pb.length} games` + (errs.length ? " • Partial: " + [...new Set(errs.map((x) => x.replace(/\(not JSON.*$/, "(blocked)")))].join("; ") : ""), _short);
@@ -4036,15 +4061,14 @@ function pickMainLine(markets, id, gameOne) {
     const tot = Number((String(m.specifier).match(/total=([\d.]+)/) || [])[1]);
     const o = (m.outcomes || []).find((x) => /^over/i.test(x.desc)), u = (m.outcomes || []).find((x) => /^under/i.test(x.desc));
     const oo = Number(o && o.odds), uo = Number(u && u.odds);
-    return { line: tot, over: oo, under: uo, bal: Math.abs(oo - uo) };
-  }).filter((x) => Number.isFinite(x.line) && Number.isFinite(x.over) && Number.isFinite(x.under) && x.over > 1 && x.under > 1);
-  cands.sort((a, b) => a.bal - b.bal); return cands[0] || null;
+    return Number.isFinite(tot) && oo > 1 && uo > 1 ? { line: tot, bal: Math.abs(oo - uo) } : null; /* prices used only to locate the main (balanced) line; discarded here */
+  }).filter(Boolean);
+  cands.sort((a, b) => a.bal - b.bal); return cands[0] ? { line: cands[0].line } : null;
 }
 async function fetchLines() {
   const f = AppState.fixture; const lg = curLeague();
-  if (!lg || !f) { marketStatus("Choose the matching fixture above.", true); return setStatus("sportyStatus", "Select a fixture first (lines are matched by SportyBet event id), then tap Fetch Market Lines.", true); }
+  if (!lg || !f) { marketStatus("Choose the matching fixture above.", true); return; }
   marketStatus("Market lookup: looking up " + f.home + " v " + f.away + "…");
-  setStatus("sportyStatus", "Matched " + f.home + " v " + f.away + ". Fetching markets…");
   let ev = null, errs = [];
   for (const live of f.live ? [1, 0] : [0, 1]) {
     try { ev = await sportyTT("event?id=" + encodeURIComponent(f.eventId) + "&live=" + live, 15000); if (ev && ev.markets && ev.markets.length) break; } catch (e) { errs.push(e.message); }
@@ -4052,21 +4076,19 @@ async function fetchLines() {
   if (AppState.fixture !== f) { engineDebug("market lines for " + f.home + " v " + f.away + " discarded (match changed)"); return; }
   if ((!ev || !(ev.markets || []).length) && /^sr:match:\d+$/.test(f.eventId)) { try { ev = await sportyEventLegacy(f.eventId); } catch (e) { errs.push(e.message); } }
   if (AppState.fixture !== f) return;
-  if (!ev) { marketStatus("Market lookup failed — type the lines manually.", true); return setStatus("sportyStatus", "SportyBet fetch failed (" + errs.join("; ") + "). Tap Fetch Market Lines to retry.", true); }
+  if (!ev) { marketStatus("Market lines: NaN — SportyBet fetch failed (" + errs.join("; ") + "). Re-select the match to retry, or type the lines.", true); return; }
   AppState.sportyEvent = ev;
   const bm = (ev.markets || []).find((m) => (Number(m.id) === 199 || Number(m.id) === 241) && /bestof:(\d)/.test(String(m.specifier || "")));
   if (bm) { const b = Number(String(bm.specifier).match(/bestof:(\d)/)[1]); if (Number.isFinite(b) && b !== AppState.bo) { AppState.bo = b; addIssue("Best-of changed to " + b + " from SportyBet market; re-fetch stats."); } }
   const inPlay = ev.status === 1 && (String(ev.setScore || "0:0") !== "0:0" || (ev.gameScore || []).some((g) => String(g) !== "0:0"));
-  if (inPlay) { window.__ttLineOdds = null; marketStatus("Match in play — lines not filled.", true); return setStatus("sportyStatus", "Match already in play (" + (ev.setScore || "") + " " + (ev.gameScore || []).join(" ") + "): live lines are moved by the score, the model is prematch only → lines not filled (NO PLAY).", true); }
+  if (inPlay) { marketStatus("Market lines: NaN — match already in play (" + (ev.setScore || "") + "): live lines move with the score and the model is prematch only → NO PLAY.", true); return; }
   const ft = pickMainLine(ev.markets, 238), h1 = pickMainLine(ev.markets, 247);
   const setNow = false;
   const filled = [];
-  if (ft) { setVal("ftMarket", ft.line); filled.push("Total Points " + ft.line + " (O " + ft.over + " / U " + ft.under + ")"); }
-  if (h1 && !setNow) { setVal("h1Market", h1.line); filled.push("1st Game Points " + h1.line + " (O " + h1.over + " / U " + h1.under + ")"); }
-  window.__ttLineOdds = { ft, h1: setNow ? null : h1 };
+  if (ft) { setVal("ftMarket", ft.line); filled.push("Total Points " + ft.line); }
+  if (h1 && !setNow) { setVal("h1Market", h1.line); filled.push("1st Game Points " + h1.line); }
   setTag("mAutoTag", filled.length > 0);
-  marketStatus(filled.length ? "Market lines loaded: " + filled.map((x) => x.replace(/ \(O .*$/, "")).join("; ") : "Market lines: NaN (not open yet)" + (/Czech Liga Pro|TT Elite/.test(lg.name) ? " — this league opens Total / 1st Game lines only once the match is live; the model is prematch, so it stays NO PLAY unless you type a line." : "."), !filled.length);
-  setStatus("sportyStatus", filled.length ? "SportyBet " + ev.homeTeamName + " v " + ev.awayTeamName + ": filled " + filled.length + " market(s): " + filled.join("; ") + ". Check them, then Run." : "No Total Points / 1st Game Points lines open on SportyBet for this match" + (setNow ? " (match already past set 1; 1st game line ignored)" : "") + ". For Czech Liga Pro / TT Elite these markets usually open only when the match goes live.", !filled.length);
+  marketStatus(filled.length ? "Market lines loaded from SportyBet: " + filled.join("; ") + (h1 ? "" : " · 1st Game Points: NaN (not open yet)") + (ft ? "" : " · Total Points: NaN (not open yet)") + ". Check them, then Run." : "Market lines: NaN (not open yet)" + (/Czech Liga Pro|TT Elite/.test(lg.name) ? " — this league opens Total / 1st Game lines only once the match is live; the model is prematch, so it stays NO PLAY unless you type a line." : "."), !filled.length);
 }
 
 /* ---------------- model ---------------- */
@@ -4179,7 +4201,7 @@ function ttHidden(list, bo, nameA, nameB, nowMs) {
   const prof = (P) => { const s = (setOneHist.get(P) || []).slice(-TTH.s1Last); return s.length && isFiniteVal(l1) ? (mean(s) - l1) * s.length / (s.length + TTH.s1N0) : 0; };
   const o1f = o1 + TTH.set1Prof * (prof(A) + prof(B));
   const [rA, nA] = rat(A, nowMs), [rB, nB] = rat(B, nowMs);
-  return { p, dlog: d, h2hEff: eff, rA, rB, nA, nB, ot, o1: o1f, offN: res.length, pool: same.length, dist: ttMixTotal(p, bo), d1: ttMixSet1(p), A: nameA, B: nameB, bo };
+  return { p, dlog: d, h2hEff: eff, rA, rB, nA, nB, ot, o1: o1f, s1prof: TTH.set1Prof * (prof(A) + prof(B)), offN: res.length, offSrc: "loaded history", pool: same.length, dist: ttMixTotal(p, bo), d1: ttMixSet1(p), A: nameA, B: nameB, bo };
 }
 
 /* ---------------- run ---------------- */
@@ -4265,7 +4287,7 @@ function explainDetails(p, L, nameA, nameB) {
   const b = document.createElement("div"); b.className = "why-pick-body";
   const m = p.model; const lines = [p.reason];
   if (m) {
-    if (m.hidden) lines.push(`Point model: P(${nameA} wins a point) ${fmtPct(m.hidden.p)}; exact set-length distribution; league offset ${fmt1(m.hidden.ot)} total / ${fmt1(m.hidden.o1)} set 1 from ${m.hidden.offN} matches.`); else lines.push("Point model unavailable (stats typed manually) — fallback set-share model used.");
+    if (m.hidden) lines.push(`Point model: P(${nameA} wins a point) ${fmtPct(m.hidden.p)}; exact set-length distribution; league offset ${fmt1(m.hidden.ot)} total / ${fmt1(m.hidden.o1)} set 1 from ${m.hidden.offN} matches (${m.hidden.offSrc || "loaded history"}).`); else lines.push("Point model unavailable (stats typed manually) — fallback set-share model used.");
     const Hm = m.hidden, s1Shown = Hm ? (isFiniteVal(Hm.o1) ? ttDistMedian(Hm.d1) + Hm.o1 : NaNv) : m.s1, totShown = Hm && isFiniteVal(Hm.ot) ? ttDistMedian(Hm.dist) + Hm.ot : NaNv;
     if (Hm) lines.push(`Point-model projections (used for the pick): total ${fmt1(totShown)} = median ${fmt1(ttDistMedian(Hm.dist))} + offset ${fmt1(Hm.ot)}; set 1 ${fmt1(s1Shown)} = median ${fmt1(ttDistMedian(Hm.d1))} + offset ${fmt1(Hm.o1)}.`);
     lines.push(`${Hm ? "Set-share cross-check (not used for the pick): " : ""}Set-win strength ${nameA} ${fmtPct(m.sA)} vs ${nameB} ${fmtPct(m.sB)} → P(${nameA} wins a set) ${fmtPct(m.p)}.`);
@@ -4601,10 +4623,10 @@ function boot() {
   document.getElementById("fixtureSelect").addEventListener("change", onFixtureSelect);
   ["teamAName", "teamBName"].forEach((id) => document.getElementById(id).addEventListener("input", () => { AppState.fixture = null; relabel(); }));
   document.getElementById("fetchBtn").addEventListener("click", fetchStats);
-  document.getElementById("sportyFetchBtn").addEventListener("click", fetchLines);
   document.getElementById("runBtn").addEventListener("click", () => { try { runEngine(); } catch (e) { addIssue("runEngine crashed: " + e.message); engineDebug("runEngine crash", { e: e.stack }); } });
-  document.getElementById("clearBtn").addEventListener("click", () => { const keep = ls.value; clearInputs(); ls.value = keep; });
+  document.getElementById("clearBtn").addEventListener("click", () => { /* Clear = full fresh-load state */ ls.value = ""; ls.dispatchEvent(new Event("change")); ttFreshRestore(); setEngineAlert(false); g_issues.length = 0; });
   document.getElementById("inputsCopyBtn").addEventListener("click", () => { const o = {}; document.querySelectorAll(".wrapper input").forEach((el) => { if (el.id) o[el.id] = el.type === "checkbox" ? el.checked : el.value; }); o.league = ls.value; o.bestOf = AppState.bo; copyText(JSON.stringify(o)); });
+  ttFreshCapture();
   trackerLoad();
   const modal = document.getElementById("trackerModal");
   const openT = () => { g_trackerView = "picks"; renderTracker(); modal.classList.add("open"); modal.setAttribute("aria-hidden", "false"); document.body.classList.add("tracker-open"); autoSettle(); };
@@ -4635,7 +4657,7 @@ function boot() {
   renderTracker();
   setInterval(autoSettle, 5 * 60000);
   window.__BETCEO_ENGINE_BOOT_SEEN = true;
-  window.TT = { runEngine, fetchStats, fetchLines, loadFixtures, AppState, TT_LEAGUES, TT_CONFIG, computeModel, loadHistory, g_tracker: () => g_tracker };
+  window.TT = { clearInputs, runEngine, fetchStats, fetchLines, loadFixtures, AppState, TT_LEAGUES, TT_CONFIG, computeModel, loadHistory, g_tracker: () => g_tracker };
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot); else boot();
 
