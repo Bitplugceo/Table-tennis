@@ -1,5 +1,3 @@
-D
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3939,11 +3937,14 @@ function clearInputs() {
   ["a", "b"].forEach((s) => PLAYER_FIELDS.forEach((f) => setVal(s + f, "")));
   ["useFTH2H", "use1GH2H"].forEach((id) => { const el = document.getElementById(id); if (el) el.checked = false; });
   ["aIntegrityTag", "bIntegrityTag"].forEach((id) => { const el = document.getElementById(id); if (el) el.textContent = ""; });
+  ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag"].forEach((id) => { const el = document.getElementById(id); if (el) el.removeAttribute("style"); }); /* tags really gone during the wipe (CSS default = hidden, same as fresh load) */
+  ["aIntegrityTag", "bIntegrityTag"].forEach((id) => { const el = document.getElementById(id); if (el) el.setAttribute("style", "margin-left:4px"); });
+  document.querySelectorAll(".section").forEach((sec) => { if (sec.id !== "leagueSection" && sec.id !== "fixtureSection") sec.classList.add("collapsed"); });
   ["fetchStatus", "marketAutoStatus", "last10SeriesAlert"].forEach((id) => setStatus(id, ""));
   const t = document.getElementById("results"); if (t) { t.style.display = "none"; t.innerHTML = "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>"; }
   AppState.fixture = null; AppState.bo = NaNv; AppState.h2hSets = null; AppState.lastFetch = null; AppState.sportyEvent = null; AppState.hidden = null;
 }
-function onLeagueChange() {
+async function onLeagueChange() {
   setEngineAlert(false);
   clearInputs();
   AppState.fixtures = [];
@@ -3953,7 +3954,7 @@ function onLeagueChange() {
   const fixSec = document.getElementById("fixtureSection"); if (fixSec) fixSec.style.display = lg ? "" : "none";
   ["a1GSection", "b1GSection", "h2h1GSection", "h1MarketSection"].forEach((id) => { const el = document.getElementById(id); if (el) el.style.display = lg ? "" : "none"; });
   updateSectionLocks();
-  if (lg) { AppState.bo = defaultBo(lg); accordionOpen("fixtureSection"); loadFixtures(0); } else accordionOpen("leagueSection");
+  if (lg) { AppState.bo = defaultBo(lg); accordionOpen("fixtureSection"); const g = window.__ttMatchGen; await ttBlankHold(); if (g === window.__ttMatchGen && curLeague() === lg) loadFixtures(0); } else accordionOpen("leagueSection");
 }
 
 /* ---------------- fixtures ---------------- */
@@ -3995,15 +3996,18 @@ async function loadFixtures(dayOffset) {
   sel.innerHTML = '<option value="">- Select match -</option>' + AppState.fixtures.map((f, i) => `<option value="${i}">${fmtT(f.start)} ${escapeHtml(f.home)} vs ${escapeHtml(f.away)}</option>`).join("");
   const _fx = AppState.fixtures.length; const _fm = _fx ? `${_fx} upcoming match(es) ${dayOffset ? "tomorrow" : "today"} (WAT).` + (errs.length ? " Partial: " + [...new Set(errs.map((x) => x.replace(/\(not JSON.*$/, "(blocked)")))].join("; ") : "") : "No fixtures found. " + [...new Set(errs.map((x) => x.replace(/\(not JSON.*$/, "(blocked)")))].join("; "); if (_fx) fetchDone(_fm, false); else fetchDone(_fm.replace(/^No fixtures found\./, "No upcoming fixtures found (live/finished matches are hidden)."), true);
 }
-function onFixtureSelect() {
+/* visible blank moment: let the wiped page paint (2 frames) and hold ~400 ms before any data lands, cached or not */
+function ttBlankHold() { return new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 400)))); }
+async function onFixtureSelect() {
   const sel = document.getElementById("fixtureSelect"); const f = AppState.fixtures[Number(sel.value)];
   clearInputs(); if (!f) return;
   AppState.fixture = f; AppState.bo = Number.isFinite(f.bo) ? f.bo : defaultBo(curLeague());
   setVal("teamAName", f.home); setVal("teamBName", f.away); relabel();
   accordionOpen("fixtureSection");
-  fetchSpin("Match selected. Fetching stats...");
   engineDebug("Fixture selected: " + f.home + " v " + f.away + " (" + f.eventId + ", " + f.src + ")");
   const gen = window.__ttMatchGen || 0;
+  await ttBlankHold(); if (gen !== window.__ttMatchGen) return; /* switched again during the hold */
+  fetchSpin("Match selected. Fetching stats...");
   Promise.allSettled([withErrorBoundary(fetchStats, "fetchStats_pickFixture")(), (async () => { if (gen === window.__ttMatchGen) await withErrorBoundary(fetchLines, "fetchLines_pickFixture")(); })()]);
 }
 function relabel() {
