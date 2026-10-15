@@ -2943,7 +2943,22 @@ body.dark-mode .tracker-analytics-section-head {
   "LOCK-42",
   "LOCK-43",
   "LOCK-44",
-  "LOCK-45"
+  "LOCK-45",
+  "LOCK-46",
+  "LOCK-47",
+  "LOCK-48",
+  "LOCK-49",
+  "LOCK-50",
+  "LOCK-51",
+  "LOCK-52",
+  "LOCK-53",
+  "LOCK-54",
+  "LOCK-55",
+  "LOCK-56",
+  "LOCK-57",
+  "LOCK-58",
+  "LOCK-59",
+  "LOCK-60"
 ]);
 (function () {
   try {
@@ -3680,6 +3695,23 @@ body.dark-mode .tracker-analytics-section-head {
 /* TT ENGINE v1.0 (13 Oct 2026) — table tennis totals: Total Points (SportyBet market 238) and 1st Game Points (market 247, gamenr=1).
    Per-league REAL averages (30-day SportyBet results), never borrowed between leagues. Missing values are NaN. Bad data -> NO PLAY. */
 "use strict";
+/* ===== LOCK-46..60 — AUDIT FIX REV 2 (15 Oct 2026) — owner-approved, intentional, DO NOT REVERT without the owner =====
+   LOCK-46 auto picks off: worker-generated picks are never imported (TT_IMPORT_WORKER_PICKS=false); they are also excluded from the record.
+   LOCK-47 a PLAY needs a fetched SportyBet price for the exact line (TT_REQUIRE_PRICE); typed/unpriced lines are NO PLAY.
+   LOCK-48 Setka Cup totals / 1st-game are NO PLAY (TT_UNVALIDATED): walk-forward never reached 55%.
+   LOCK-49 a fitted calibration slope below calMinSlope = no matchup skill = NO PLAY (no silent 0.3 floor).
+   LOCK-50 leagues with no TT_CAL entry run on the default slope but are capped at grade C.
+   LOCK-51 worker-imported rows get a real leagueKey (correlation guard sees them).
+   LOCK-52 fetchJson cache is bounded and never stores 1 ms-TTL polls.
+   LOCK-53 Fetch Stats click no longer passes the Event as _retry.
+   LOCK-54 SportyBet cancelled/abandoned/walkover/retired = void; auto-settle stops retrying after 72 h.
+   LOCK-55 a pick later retracted to NO PLAY is voided even if it was synced.
+   LOCK-56 integer lines: exact over/under/push split; EV counts the push refund.
+   LOCK-57 history load budget 12 s -> 30 s (fewer false "partial history" blocks).
+   LOCK-58 pending pre-match picks refresh ALL fields (proj/edge/prob/odds/EV/grade) on a re-run.
+   LOCK-59 save-failure counter wired to the Health page; unused daysAgo parse removed.
+   LOCK-60 worker side (cron, X-TT-Key enforcement, calibration reproducibility) is a separate pass.
+   This is a change record, not a technical lock: a comment cannot stop anyone from editing the file. ===== */
 /* AUDIT FIX REV 1 (13 Oct 2026): settlement guard (set1>=20) removed; Gauss-Hermite nodes rescaled to a true N(0,1) quadrature;
    probability + odds/EV gates; median-consistent calibration; deterministic history load; stats/best-of/H2H coherence;
    Unicode-safe name matching; strict series parsing; sample SD; WAT day bounds; tracker stale-pick handling; honest report stats. */
@@ -3698,12 +3730,17 @@ const TT_CONFIG = Object.freeze({
   volatilityMult: 1.5, sanityCapTotal: 14, sanityCapSet1: 5.0,
   /* probability / price gates (point edges alone are not comparable across markets: 1 pt of set-1 edge ~ 6-7 pp, 1 pt of total ~ 1.5 pp) */
   minProbSide: 0.55, maxProbSide: 0.85, modelShrink: 0.75, minEV: 0.0,
-  minLeagueN: 100, calMinSlope: 0.3, staleDataDays: 45, loadBudgetMs: 12000,
+  minLeagueN: 100, calMinSlope: 0.3, staleDataDays: 45, loadBudgetMs: 30000,
   maxPairPicksPerDay: 1, maxPlayerPicksPerDay: 2,
 });
 const TT_MARKETS = { ft: { id: 238, label: "Total Points" }, h1: { id: 247, label: "1st Game Points" } };
 const TRACKER_KEY = "TT_TRACKER_V1";
-const TT_MODEL_FIX = "audit-fix-1";
+const TT_MODEL_FIX = "audit-fix-2";
+/* AUTO-PICKS OFF (15 Oct 2026): the worker (pre-start cron + diag batch) logs picks / LEANs for games nobody ran, and the client used to import them into Tracked Picks.
+   false = picks only ever come from the Run button. Already-tracked rows still get their settlement status. Set true to restore the old import. */
+const TT_IMPORT_WORKER_PICKS = false;
+const TT_REQUIRE_PRICE = true; /* LOCK-47: a PLAY needs the fetched SportyBet price for exactly this line; set false to allow typed/unpriced lines again */
+const TT_UNVALIDATED = new Set(["Ukraine - Setka Cup|ft", "Ukraine - Setka Cup|h1", "Czechia - Setka Cup|ft", "Czechia - Setka Cup|h1", "Moldova - Setka Cup|ft", "Moldova - Setka Cup|h1"]); /* LOCK-48: no validated edge; empty this set to re-enable */
 const TT_TEST_MODE = /[?&]ttTest=1\b/.test(location.search) || !!window.__TT_NO_TRACKER;
 
 /* ---------------- debug / error surfaces ---------------- */
@@ -3766,7 +3803,8 @@ async function fetchJson(url, label, ttlMs, timeoutMs) {
     const txt = await r.text(); let d = null; try { d = JSON.parse(txt); } catch (_e) {}
     g_fetchLog.unshift(`${new Date().toLocaleTimeString([], { hour12: false })} ${label} ${r.status} ${Date.now() - t0}ms ${url.slice(0, 160)}`); try { AFDB.log(r.ok ? "NET" : "ERROR", label, r.status + " · " + (Date.now() - t0) + "ms", url.slice(0, 200)); } catch (_e) {}
     if (!r.ok || !d) throw new Error(label + " HTTP " + r.status + (d ? "" : " (not JSON: " + txt.slice(0, 60) + ")"));
-    _cache.set(url, { t: Date.now(), d }); return d;
+    if ((ttlMs || 60000) > 1000) { _cache.set(url, { t: Date.now(), d }); while (_cache.size > 120) _cache.delete(_cache.keys().next().value); } /* LOCK-52: never cache 1 ms polls; bounded size */
+    return d;
   } catch (e) {
     g_fetchLog.unshift(`${new Date().toLocaleTimeString([], { hour12: false })} ${label} FAIL ${String(e && e.message || e)} ${url.slice(0, 160)}`); try { AFDB.log("ERROR", label, "FAIL " + String(e && e.message || e), url.slice(0, 200)); } catch (_e) {}
     throw e;
@@ -4051,7 +4089,7 @@ async function fetchStats(_retry) {
   try {
     const { list, errs, truncated } = await loadHistory(lg, TT_CONFIG.historyDays, [A, B], (msg) => { if (!stale()) fetchSpin("Loading history… " + msg); });
     if (stale()) { engineDebug("stats for " + A + " v " + B + " discarded (match changed while loading)"); return; }
-    if (AppState.bo !== bo && !_retry) { engineDebug("best-of changed while loading (" + bo + " → " + AppState.bo + ") — rebuilding stats"); return fetchStats(true); } /* stats must always be built for the best-of that will be evaluated */
+    if (AppState.bo !== bo && _retry !== true) { engineDebug("best-of changed while loading (" + bo + " → " + AppState.bo + ") — rebuilding stats"); return fetchStats(true); } /* stats must always be built for the best-of that will be evaluated */
     if (!list.length) { fetchDone("❌ No results available for " + lg.name + ". " + [...new Set(errs.map((x) => x.replace(/\(not JSON.*$/, "(blocked)")))].join("; ") + " → NO PLAY until stats load or are typed in.", true); return; }
     fetchSpin("Building last-" + TT_CONFIG.lastN + " for " + A + " and " + B + "...");
     const same = list.filter((m) => m.bo === bo);
@@ -4129,10 +4167,9 @@ function readPlayer(s) {
   const pw = parseSeries(s + "FTScored"), pl = parseSeries(s + "FTAllowed");
   const sw = parseSeries(s === "a" ? "aFTScoredHome" : "bFTScoredAway"), sl = parseSeries(s === "a" ? "aFTAllowedHome" : "bFTAllowedAway");
   const gw = parseSeries(s + "1GScored"), gl = parseSeries(s + "1GAllowed");
-  const daysAgo = parseSeries(s === "a" ? "a1GAllowedHome" : "b1GAllowedAway");
   const n = Math.min(pw.length, pl.length, sw.length, sl.length);
   const ok = seriesValid(pw) && seriesValid(pl) && seriesValid(sw) && seriesValid(sl) && seriesValid(gw) && seriesValid(gl) && pw.length === pl.length && sw.length === sl.length && pw.length === sw.length && gw.length === gl.length && gw.length === pw.length;
-  const games = []; for (let i = 0; i < n; i++) games.push({ won: sw[i], lost: sl[i], total: pw[i] + pl[i], sets: sw[i] + sl[i], set1: (gw[i] ?? NaNv) + (gl[i] ?? NaNv), daysAgo: daysAgo[i] });
+  const games = []; for (let i = 0; i < n; i++) games.push({ won: sw[i], lost: sl[i], total: pw[i] + pl[i], sets: sw[i] + sl[i], set1: (gw[i] ?? NaNv) + (gl[i] ?? NaNv) });
   return { ok, n, games: games.slice(0, TT_CONFIG.lastN) };
 }
 function computeModel(L, A, B, h2h, bo) {
@@ -4287,17 +4324,23 @@ function evaluate(market, L, model, line, ctx) {
   if (!isFiniteVal(line)) return noPlay(market, NaNv, NaNv, "No " + TT_MARKETS[market].label + " line (fetch SportyBet lines or type it).");
   const bounds = market === "ft" ? [L.bestOf === 7 ? 70 : 45, L.bestOf === 7 ? 160 : 110] : [14, 26];
   if (line < bounds[0] || line > bounds[1]) return noPlay(market, line, NaNv, "Line " + line + " is outside the sane range for this market (" + bounds.join("–") + ").");
-  let proj, pOver;
+  if (TT_UNVALIDATED.has(L.league + "|" + market)) return noPlay(market, line, NaNv, L.league + " " + TT_MARKETS[market].label + " has no validated edge (walk-forward never reached 55% side-balanced) → NO PLAY."); /* LOCK-48 */
+  const calEntry = TT_CAL[L.league], calKnown = !!calEntry, calSlope = (calEntry || TT_CAL._default)[market === "ft" ? 0 : 1];
+  if (calKnown && calSlope < TT_CONFIG.calMinSlope) return noPlay(market, line, NaNv, `${L.league} ${TT_MARKETS[market].label}: fitted calibration slope ${calSlope} is below ${TT_CONFIG.calMinSlope} — the matchup has no measured predictive value → NO PLAY.`); /* LOCK-49: no silent floor */
+  let proj, pOver, dd = null, doff = 0;
   const H = model.hidden;
-  if (H && market === "ft") { if (!isFiniteVal(H.ot)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); const C = ttCalOffsets(H, L.league); proj = ttFair(H.dist, C.offT); pOver = ttPOver(H.dist, line, C.offT); }
-  else if (H) { if (!isFiniteVal(H.o1)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); const C = ttCalOffsets(H, L.league); proj = ttFair(H.d1, C.off1); pOver = ttPOver(H.d1, line, C.off1); }
+  if (H && market === "ft") { if (!isFiniteVal(H.ot)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); const C = ttCalOffsets(H, L.league); proj = ttFair(H.dist, C.offT); pOver = ttPOver(H.dist, line, C.offT); dd = H.dist; doff = C.offT; }
+  else if (H) { if (!isFiniteVal(H.o1)) return noPlay(market, line, NaNv, "League offset needs >=" + TTH.offMin + " rated matches in the loaded history."); const C = ttCalOffsets(H, L.league); proj = ttFair(H.d1, C.off1); pOver = ttPOver(H.d1, line, C.off1); dd = H.d1; doff = C.off1; }
   else if (market === "ft") { if (!model.comps.length) return noPlay(market, line, NaNv, "League set-count distribution too thin."); proj = fairLineMix(model.comps); pOver = pOverMix(model.comps, line); }
-  else { if (!model.s1d || !isFiniteVal(model.s1off)) return noPlay(market, line, NaNv, "Set-1 distribution unavailable."); proj = ttFair(model.s1d, model.s1off); pOver = ttPOver(model.s1d, line, model.s1off); }
+  else { if (!model.s1d || !isFiniteVal(model.s1off)) return noPlay(market, line, NaNv, "Set-1 distribution unavailable."); proj = ttFair(model.s1d, model.s1off); pOver = ttPOver(model.s1d, line, model.s1off); dd = model.s1d; doff = model.s1off; }
   if (!isFiniteVal(proj) || !isFiniteVal(pOver)) return noPlay(market, line, NaNv, "Projection not finite.");
   const edge = proj - line;
   const base = { marketKey: market, name: TT_MARKETS[market].label, line, proj, edge, prob: pOver };
   if (Math.abs(edge) > cap) return Object.assign(base, { pick: "NO PLAY", grade: "NaN", reason: "Edge " + fmt1(edge) + " exceeds the sanity cap ±" + cap + " (wrong line, wrong game or broken data)." });
-  const side = edge > 0 ? "OVER" : "UNDER"; const pSide = side === "OVER" ? pOver : 1 - pOver;
+  const side = edge > 0 ? "OVER" : "UNDER";
+  let pOv = pOver, pUn = 1 - pOver, pPush = 0; /* LOCK-56: whole-number line = exact over / under / push split (a push refunds the stake) */
+  if (dd && Number.isInteger(line)) { pOv = ttPOver(dd, line + 0.5, doff); pUn = 1 - ttPOver(dd, line - 0.5, doff); pPush = Math.max(0, Math.min(0.5, 1 - pOv - pUn)); }
+  const pSide = (side === "OVER" ? pOv : pUn) / (1 - pPush); /* win probability given the bet is not a push */
   const needEdge = side === "UNDER" ? minEdge * uf : minEdge;
   if (Math.abs(edge) < needEdge) return Object.assign(base, { pick: "NO PLAY", grade: "NaN", reason: `Below ${L.league} threshold: edge ${fmt1(edge)} (need ±${needEdge}).` });
   if (ctx.blockReason) return Object.assign(base, { pick: "NO PLAY", grade: "NaN", reason: ctx.blockReason });
@@ -4306,10 +4349,11 @@ function evaluate(market, L, model, line, ctx) {
   if (pSide > TT_CONFIG.maxProbSide) return Object.assign(base, { pick: "NO PLAY", grade: "NaN", pSide, reason: `Implied probability ${fmtPct(pSide)} is above ${fmtPct(TT_CONFIG.maxProbSide)}: a book does not misprice a total that much — wrong line, wrong game or broken data.` });
   /* price gate: only when the SportyBet price for exactly this line was fetched (typed lines have no price) */
   const od = ctx.odds ? (side === "OVER" ? Number(ctx.odds.over) : Number(ctx.odds.under)) : NaNv; let ev = NaNv, evTxt = " Odds not checked (no fetched price for this line).";
-  if (isFiniteVal(od) && od > 1) { const pAdj = 0.5 + TT_CONFIG.modelShrink * (pSide - 0.5); ev = pAdj * od - 1; evTxt = ` EV ${(ev * 100).toFixed(1)}% at ${od} (P shrunk to ${fmtPct(pAdj)}).`;
+  if (TT_REQUIRE_PRICE && !(isFiniteVal(od) && od > 1)) return Object.assign(base, { pick: "NO PLAY", grade: "NaN", pSide, reason: `No fetched SportyBet price for exactly ${side} ${line}: a typed or edited line cannot be checked against a real price (or proven prematch) → NO PLAY.` }); /* LOCK-47 */
+  if (isFiniteVal(od) && od > 1) { const pAdj = 0.5 + TT_CONFIG.modelShrink * (pSide - 0.5); ev = pAdj * (1 - pPush) * od + pPush - 1; evTxt = ` EV ${(ev * 100).toFixed(1)}% at ${od} (P shrunk to ${fmtPct(pAdj)}).`;
     if (ev < TT_CONFIG.minEV) return Object.assign(base, { pick: "NO PLAY", grade: "NaN", pSide, ev, oddsUsed: od, reason: `No value on ${side} ${line}:${evTxt}` }); }
-  const grade = pSide >= 0.68 ? "A" : pSide >= 0.62 ? "B" : "C";
-  return Object.assign(base, { pick: side + " " + line, side, pSide, ev, oddsUsed: od, grade, reason: `${side}: projection ${fmt1(proj)} vs line ${line} (edge ${fmt1(edge)}, need ±${needEdge}); model P ${fmtPct(pSide)}.${evTxt}` });
+  let grade = pSide >= 0.68 ? "A" : pSide >= 0.62 ? "B" : "C"; if (!calKnown) grade = "C"; /* LOCK-50: uncalibrated league = capped at C */
+  return Object.assign(base, { pick: side + " " + line, side, pSide, pPush, ev, oddsUsed: od, grade, reason: `${side}: projection ${fmt1(proj)} vs line ${line} (edge ${fmt1(edge)}, need ±${needEdge}); model P ${fmtPct(pSide)}${pPush > 0.001 ? " (push " + fmtPct(pPush) + ")" : ""}.${evTxt}${calKnown ? "" : " Uncalibrated league (default slope): grade capped at C."}` });
 }
 function runEngine() {
   setEngineAlert(false);
@@ -4395,13 +4439,13 @@ function renderRows(table, rows, lg, nameA, nameB, L) {
 /* ---------------- tracker ---------------- */
 let g_tracker = { picks: [] };
 function trackerLoad() { try { setTimeout(() => { const st = g_tracker.picks.reduce((o, p) => { o[p.resultStatus] = (o[p.resultStatus] || 0) + 1; return o; }, {}); engineDebug("hydrate state snapshot", { local: { totalCount: g_tracker.picks.length, pending: st.pending || 0, wins: st.win || 0, losses: st.loss || 0, pushes: st.push || 0 } }); }, 0); const j = JSON.parse(localStorage.getItem(TRACKER_KEY) || "null"); g_tracker = j && Array.isArray(j.picks) ? j : { picks: [] }; } catch (_e) { g_tracker = { picks: [] }; } }
-function trackerSave() { trackerDebug("tracker save", { picks: g_tracker.picks.length, testMode: !!TT_TEST_MODE }); if (TT_TEST_MODE) return; try { localStorage.setItem(TRACKER_KEY, JSON.stringify(g_tracker)); } catch (e) { addIssue("Tracker save failed: " + e.message); } }
+function trackerSave() { trackerDebug("tracker save", { picks: g_tracker.picks.length, testMode: !!TT_TEST_MODE }); if (TT_TEST_MODE) return; try { localStorage.setItem(TRACKER_KEY, JSON.stringify(g_tracker)); window.__ttSaveFailures = 0; } catch (e) { window.__ttSaveFailures = (window.__ttSaveFailures || 0) + 1; addIssue("Tracker save failed: " + e.message); } }
 function watDayKey(ms) { return Math.floor((ms + 3600000) / 86400000); }
 function trackerCorrelationBlock(lg, A, B) {
   const f = AppState.fixture; const day = watDayKey(f && f.start ? f.start : Date.now()); /* the event's WAT day, not the day the pick was created */
   const nA = normName(A), nB = normName(B), pair = [nA, nB].sort().join("|"); const out = {};
   ["ft", "h1"].forEach((mk) => {
-    const same = g_tracker.picks.filter((p) => !p.lean && p.marketKey === mk && p.leagueKey === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== (f && f.eventId));
+    const same = g_tracker.picks.filter((p) => !p.lean && p.resultStatus !== "void" && p.marketKey === mk && (p.leagueKey || leagueKeyOf(p.league)) === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== (f && f.eventId));
     const names = (p) => [normName(p.homeTeam), normName(p.awayTeam)];
     const pairN = same.filter((p) => names(p).slice().sort().join("|") === pair).length;
     const plA = same.filter((p) => names(p).includes(nA)).length, plB = same.filter((p) => names(p).includes(nB)).length;
@@ -4415,7 +4459,7 @@ function trackPicks(list, lg, A, B) {
   list.forEach((p) => {
     const sig = f.eventId + "|" + p.marketKey; const ex = g_tracker.picks.find((x) => x.signature === sig);
     const fields = { bo: AppState.bo, line: p.line, side: p.side, pick: p.pick, grade: p.grade, mv: TT_MODEL_VERSION, proj: Math.round(p.proj * 10) / 10, edge: Math.round(p.edge * 10) / 10, prob: isFiniteVal(p.pSide) ? Math.round(p.pSide * 1000) / 1000 : NaNv, odds: isFiniteVal(p.oddsUsed) ? p.oddsUsed : NaNv, ev: isFiniteVal(p.ev) ? Math.round(p.ev * 1000) / 1000 : NaNv };
-    if (ex) { if (ex.resultStatus === "pending" && !ex.lean && Date.now() < f.start && (ex.line !== p.line || ex.side !== p.side)) { Object.assign(ex, fields); ex.synced = false; addIssue("Tracked pick refreshed with the latest run: " + p.pick); } return; } /* a pending pre-match pick follows the latest run; settled/started picks are never rewritten */
+    if (ex) { if (ex.resultStatus === "pending" && !ex.lean && Date.now() < f.start) { const was = Object.keys(fields).reduce((o, k) => { o[k] = ex[k]; return o; }, {}); if (JSON.stringify(was) !== JSON.stringify(fields)) { const moved = ex.line !== p.line || ex.side !== p.side; Object.assign(ex, fields); ex.synced = false; if (moved) addIssue("Tracked pick refreshed with the latest run: " + p.pick); } } return; } /* LOCK-58: every field follows the latest pre-match run */ /* a pending pre-match pick follows the latest run; settled/started picks are never rewritten */
     g_tracker.picks.unshift(Object.assign({ signature: sig, eventId: f.eventId, leagueKey: lg.key, league: lg.name, homeTeam: A, awayTeam: B, pairKey: [normName(A), normName(B)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.marketKey, market: TT_MARKETS[p.marketKey].label, resultStatus: "pending", actual: NaNv, build: TT_BUILD }, fields));
   });
   trackerSave(); renderTracker(); syncPicksToWorker();
@@ -4424,7 +4468,7 @@ function trackPicks(list, lg, A, B) {
 function withdrawPendingPick(marketKey) {
   const f = AppState.fixture; if (!f || !f.eventId || !(Date.now() < f.start)) return; const sig = f.eventId + "|" + marketKey; const i = g_tracker.picks.findIndex((x) => x.signature === sig && x.resultStatus === "pending" && !x.lean);
   if (i < 0) return; const x = g_tracker.picks[i];
-  if (!x.synced) { g_tracker.picks.splice(i, 1); trackerSave(); renderTracker(); addIssue("Earlier tracked pick withdrawn: latest run is NO PLAY (" + x.pick + ")."); } else addIssue("Earlier pick " + x.pick + " is still tracked (already synced) but the latest run is NO PLAY.");
+  if (!x.synced) { g_tracker.picks.splice(i, 1); trackerSave(); renderTracker(); addIssue("Earlier tracked pick withdrawn: latest run is NO PLAY (" + x.pick + ")."); } else { x.resultStatus = "void"; x.withdrawn = true; x.settledBy = "withdrawn"; x.settledAt = Date.now(); x.synced = false; trackerSave(); renderTracker(); syncPicksToWorker(); addIssue("Earlier pick " + x.pick + " voided: the latest run is NO PLAY (it had already been synced)."); } /* LOCK-55 */
 }
 function syncPicksToWorker() {
   if (TT_TEST_MODE) return;
@@ -4447,7 +4491,7 @@ async function autoSettle(force) {
     const m = new Map(((j && j.rows) || []).map((x) => [x.sig, x]));
     pend.forEach((p) => { const x = m.get(p.signature); if (x && x.status && x.status !== "pending" && (x.status === "void" || (isFiniteVal(x.actual) && x.actual >= (p.marketKey === "ft" ? 33 : 11)))) { p.resultStatus = x.status; p.actual = isFiniteVal(x.actual) ? x.actual : NaNv; p.settledAt = Date.now(); p.settledBy = "worker"; changed = true; } });
   } catch (e) { reportSoftFailure("worker-settle", e); }
-  for (const p of pend.filter((x) => x.resultStatus === "pending")) {
+  for (const p of pend.filter((x) => x.resultStatus === "pending" && Date.now() < x.eventDate + 72 * 3600000)) { /* LOCK-54: stop auto-retrying after 72 h; settle by hand */
     try {
       let r = null;
       if (/^sr:match:\d+$/.test(p.eventId)) { const d = await gismo("match_info/" + p.eventId.split(":")[2], 60000); const lgN = p.league; r = fromGismo(Object.assign({}, d.match, { status: d.match.status }), lgN); if (d.match && (d.match.walkover || d.match.cancelled || d.match.retired)) { p.resultStatus = "void"; p.settledAt = Date.now(); changed = true; continue; } }
@@ -4455,7 +4499,7 @@ async function autoSettle(force) {
         let found = false;
         for (let page = 1; page <= 20 && !found; page++) {
           const day = await sportyTT("results?start=" + (p.eventDate - 30 * 60000) + "&end=" + (p.eventDate + 3 * 3600000) + "&page=" + page + "&tids=", 120000);
-          (day.tournaments || []).forEach((t) => (t.events || []).forEach((e) => { if (e.eventId === p.eventId) { found = true; if (e.matchStatus === "Cancelled") { p.resultStatus = "void"; p.settledAt = Date.now(); changed = true; } else r = fromSporty(e, p.league); } }));
+          (day.tournaments || []).forEach((t) => (t.events || []).forEach((e) => { if (e.eventId === p.eventId) { found = true; if (/cancel|abandon|walkover|retire/i.test(String(e.matchStatus || ""))) { p.resultStatus = "void"; p.settledAt = Date.now(); changed = true; } else r = fromSporty(e, p.league); } }));
           if (page * 100 >= (day.totalNum || 0)) break;
         }
       }
@@ -4580,8 +4624,9 @@ async function pullWorkerPicks() {
     (j.rows || []).forEach((x) => {
       if (!x.src) return; const mk = x.mk === "238" ? "ft" : "h1"; const ex = have.get(x.sig);
       if (ex) { if (ex.src === x.src && ex.resultStatus === "pending" && x.status && x.status !== "pending") { ex.resultStatus = x.status; ex.actual = isFiniteVal(x.actual) ? x.actual : NaNv; ex.settledAt = x.settled || Date.now(); upd++; } return; }
+      if (!TT_IMPORT_WORKER_PICKS) return; /* auto-generated worker pick: do not add it */
       const lean = x.play === false;
-      g_tracker.picks.push({ signature: x.sig, eventId: x.id, leagueKey: "", league: x.lg, bo: x.bo, homeTeam: x.h || "Player A", awayTeam: x.a || "Player B", pairKey: [normName(x.h || ""), normName(x.a || "")].sort().join("|"), eventDate: x.start, createdAt: x.created, marketKey: mk, market: TT_MARKETS[mk].label, line: x.line, side: x.side, pick: (lean ? "LEAN " : "") + x.side + " " + x.line, grade: lean ? "LEAN" : "PLAY", proj: x.proj, edge: x.edge, lean, src: x.src, mv: x.mv, resultStatus: x.status || "pending", actual: isFiniteVal(x.actual) ? x.actual : NaNv, synced: true });
+      g_tracker.picks.push({ signature: x.sig, eventId: x.id, leagueKey: leagueKeyOf(x.lg || ""), league: x.lg, bo: x.bo, homeTeam: x.h || "Player A", awayTeam: x.a || "Player B", pairKey: [normName(x.h || ""), normName(x.a || "")].sort().join("|"), eventDate: x.start, createdAt: x.created, marketKey: mk, market: TT_MARKETS[mk].label, line: x.line, side: x.side, pick: (lean ? "LEAN " : "") + x.side + " " + x.line, grade: lean ? "LEAN" : "PLAY", proj: x.proj, edge: x.edge, lean, src: x.src, mv: x.mv, resultStatus: x.status || "pending", actual: isFiniteVal(x.actual) ? x.actual : NaNv, synced: true });
       added++;
     });
     if (added || upd) { g_tracker.picks.sort((a, b) => b.eventDate - a.eventDate); trackerSave(); renderTracker(); }
@@ -4689,7 +4734,7 @@ function updateTrackerInsightsButton() {
 function setTrackerModalView(v) { g_trackerView = ["picks", "report", "debug", "config", "health"].includes(v) ? v : "picks"; renderTracker(); }
 const _pct = (w, l) => (w + l ? (w / (w + l)) * 100 : NaN);
 const formatPctTT = (v) => (isFinite(v) ? v.toFixed(1) + "%" : "NaN");
-function _rec(list) { list = list.filter((p) => !p.lean); /* diagnostic LEAN rows (NO PLAY by the engine) are shown but never counted in the record */ const w = list.filter((p) => p.resultStatus === "win").length, l = list.filter((p) => p.resultStatus === "loss").length, pu = list.filter((p) => p.resultStatus === "push").length; return { wins: w, losses: l, pushes: pu, settled: w + l + pu, winPct: _pct(w, l) }; }
+function _rec(list) { list = list.filter((p) => !p.lean && !p.src); /* LOCK-46: worker-generated rows (src) are never part of the record. */ /* diagnostic LEAN rows (NO PLAY by the engine) are shown but never counted in the record */ const w = list.filter((p) => p.resultStatus === "win").length, l = list.filter((p) => p.resultStatus === "loss").length, pu = list.filter((p) => p.resultStatus === "push").length; return { wins: w, losses: l, pushes: pu, settled: w + l + pu, winPct: _pct(w, l) }; }
 function _groupRows(list, keyFn) { const g = {}; list.forEach((p) => { const k = keyFn(p); if (k == null) return; (g[k] = g[k] || []).push(p); }); return Object.keys(g).map((k) => Object.assign({ label: k }, _rec(g[k]))).sort((a, b) => b.settled - a.settled); }
 function _table(head, rows, empty, cols) { return `<div class="table-wrap tracker-report-table-wrap"><table class="tracker-analytics-table"><thead><tr>${head}</tr></thead><tbody>${rows || `<tr><td colspan="${cols}" class="note">${empty}</td></tr>`}</tbody></table></div>`; }
 function _card(title, meta, body) { return `<div class="tracker-analytics-card"><div class="tracker-analytics-card-head"><div class="tracker-analytics-card-title">${title}</div><div class="tracker-analytics-card-meta">${meta}</div></div><div class="tracker-analytics-card-body">${body}</div></div>`; }
@@ -4837,7 +4882,7 @@ function boot() {
   document.getElementById("fixturesTomorrowBtn").addEventListener("click", () => loadFixtures(1));
   document.getElementById("fixtureSelect").addEventListener("change", onFixtureSelect);
   ["teamAName", "teamBName"].forEach((id) => document.getElementById(id).addEventListener("input", () => { const f = AppState.fixture; if (f && (normName(document.getElementById("teamAName").value) !== normName(f.home) || normName(document.getElementById("teamBName").value) !== normName(f.away))) AppState.fixture = null; relabel(); }));
-  document.getElementById("fetchBtn").addEventListener("click", fetchStats);
+  document.getElementById("fetchBtn").addEventListener("click", () => fetchStats()); /* LOCK-53: do not pass the click Event as _retry */
   document.getElementById("runBtn").addEventListener("click", () => { try { runEngine(); } catch (e) { addIssue("runEngine crashed: " + e.message); engineDebug("runEngine crash", { e: e.stack }); } });
   document.getElementById("clearBtn").addEventListener("click", () => { /* Clear = full fresh-load state */ ls.value = ""; ls.dispatchEvent(new Event("change")); ttFreshRestore(); setEngineAlert(false); g_issues.length = 0; });
   document.getElementById("inputsCopyBtn").addEventListener("click", () => { const o = {}; document.querySelectorAll(".wrapper input").forEach((el) => { if (el.id) o[el.id] = el.type === "checkbox" ? el.checked : el.value; }); o.league = ls.value; o.bestOf = AppState.bo; copyText(JSON.stringify(o)); });
