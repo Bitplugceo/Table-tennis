@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3969,7 +3968,7 @@ function setVal(id, v) { const el = document.getElementById(id); if (el) el.valu
 function setTag(id, on) { const el = document.getElementById(id); if (el) el.style.display = on ? "inline-block" : "none"; }
 /* 12-hour display clock, e.g. "13 Oct 2026 at 7:30 PM" (display only; storage stays epoch ms) */
 function fmtDT(ms) { const d = new Date(Number(ms)); if (!isFinite(d.getTime())) return "NaN"; return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) + " at " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }); }
-function fmtT(ms) { const d = new Date(Number(ms)); return isFinite(d.getTime()) ? d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }) : "NaN"; }
+function fmtT(ms) { const d = new Date(Number(ms)); if (!isFinite(d.getTime())) return "NaN"; return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" }) + " " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }); }
 function setStatusHTML(html, type) { const el = document.getElementById("fetchStatus"); if (!el) return; el.className = type || ""; el.style.color = ""; el.innerHTML = html || ""; }
 function fetchSpin(msg) { try { AFDB.log("FETCH", "FETCH", msg); } catch (_e) {} setStatusHTML('<span class="spinner"></span>' + escapeHtml(msg), "loading"); }
 function fetchDone(msg, bad) { try { AFDB.log(bad ? "WARN" : "SUCCESS", "FETCH", msg); } catch (_e) {} setStatusHTML('<div style="font-weight:bold;">' + escapeHtml(msg) + "</div>", bad ? "err" : "ok"); if (bad) addIssue(msg); }
@@ -4066,25 +4065,31 @@ async function loadFixtures(dayOffset) {
   if (!lg || !sel) return;
   sel.innerHTML = '<option value="">Loading…</option>';
   const espn = lg.espn || "nfl";
-  const day = new Date(Date.now() + (dayOffset || 0) * 86400000);
-  const ymd = day.toISOString().slice(0, 10).replace(/-/g, "");
-  const url = "https://site.api.espn.com/apis/site/v2/sports/football/" + espn + "/scoreboard?dates=" + ymd + "&limit=200";
+  const base = new Date(); base.setHours(0, 0, 0, 0);
+  base.setDate(base.getDate() + (dayOffset || 0));
+  const dayStart = base.getTime(), dayEnd = dayStart + 86400000;
+  const ymds = [-1, 0, 1].map((n) => { const d = new Date(base); d.setDate(d.getDate() + n); const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, "0"), dd = String(d.getDate()).padStart(2, "0"); return "" + y + m + dd; });
+  const out = []; const seen = new Set();
   try {
-    const d = await fetchJson(url, "espn-scoreboard", 60000, 12000);
-    const events = (d && d.events) || [];
-    const out = [];
-    events.forEach((ev) => {
-      const comp = (ev.competitions || [])[0]; if (!comp) return;
-      const st = String((ev.status && ev.status.type && ev.status.type.state) || "");
-      if (st === "post" || st === "in") return;
-      const home = (comp.competitors || []).find((c) => c.homeAway === "home");
-      const away = (comp.competitors || []).find((c) => c.homeAway === "away");
-      if (!home || !away) return;
-      out.push({ eventId: ev.id, home: home.team.displayName, away: away.team.displayName, hid: home.team.id, aid: away.team.id, start: Date.parse(ev.date), src: "ESPN" });
-    });
+    for (const ymd of ymds) {
+      const d = await fetchJson("https://site.api.espn.com/apis/site/v2/sports/football/" + espn + "/scoreboard?dates=" + ymd + "&limit=300", "espn-scoreboard", 60000, 12000);
+      ((d && d.events) || []).forEach((ev) => {
+        if (seen.has(ev.id)) return;
+        const comp = (ev.competitions || [])[0]; if (!comp) return;
+        const st = String((ev.status && ev.status.type && ev.status.type.state) || "");
+        if (st === "post" || st === "in") return;
+        const start = Date.parse(ev.date);
+        if (!(start >= dayStart && start < dayEnd)) return;
+        const home = (comp.competitors || []).find((c) => c.homeAway === "home");
+        const away = (comp.competitors || []).find((c) => c.homeAway === "away");
+        if (!home || !away) return;
+        seen.add(ev.id);
+        out.push({ eventId: ev.id, home: home.team.displayName, away: away.team.displayName, hid: home.team.id, aid: away.team.id, start, src: "ESPN" });
+      });
+    }
     AppState.fixtures = out.sort((a, b) => a.start - b.start);
     sel.innerHTML = '<option value="">- Select match -</option>' + AppState.fixtures.map((f, i) => `<option value="${i}">${fmtT(f.start)} ${escapeHtml(f.home)} vs ${escapeHtml(f.away)}</option>`).join("");
-    fetchDone(out.length ? out.length + " upcoming match(es)." : "No upcoming fixtures.", !out.length);
+    fetchDone(out.length ? out.length + " upcoming match(es) for " + (dayOffset ? "tomorrow" : "today") + "." : "No upcoming fixtures for " + (dayOffset ? "tomorrow" : "today") + ".", !out.length);
   } catch (e) { sel.innerHTML = '<option value="">- Select match -</option>'; fetchDone("Fixture fetch failed: " + (e.message || e), true); }
 }
 function hbBlankHold() { return new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 400)))); }
@@ -4178,17 +4183,40 @@ async function fetchLines() {
   const f = AppState.fixture; const lg = curLeague();
   if (!lg || !f) { marketStatus("Choose the matching fixture above.", true); return; }
   marketStatus("Market lookup: looking up " + f.home + " v " + f.away + "…");
+  let filled = false;
+  try {
+    const list = await fetchJson(HB_PROXY_FALLBACK + "/sporty/list?page=1&sport=football", "SportyBet-football", 60000, 12000);
+    const tours = (list && list.data && list.data.tournaments) || [];
+    let match = null;
+    for (const t of tours) {
+      for (const ev of (t.events || [])) {
+        if (normName(ev.homeTeamName) === normName(f.home) && normName(ev.awayTeamName) === normName(f.away)) { match = ev; break; }
+      }
+      if (match) break;
+    }
+    if (match && match.eventId) {
+      const ev = await sportyEvent(match.eventId, 15000);
+      if (ev && ev.markets) {
+        HB_MK_ORDER.forEach((mk) => {
+          const r = pickMainLine(ev.markets, HB_MARKETS[mk].id);
+          if (r && isFiniteVal(r.line)) { setVal(HB_INPUT_IDS[mk], r.line); AppState.autoLines[mk] = r.line; filled = true; }
+        });
+        if (filled) { setTag("mAutoTag", true); marketStatus("Market lines loaded from SportyBet.", false); return; }
+      }
+    }
+  } catch (_e) {}
   const espn = lg.espn || "nfl";
   try {
     const d = await fetchJson("https://site.api.espn.com/apis/site/v2/sports/football/" + espn + "/summary?event=" + f.eventId, "espn-odds", 60000, 12000);
     const odds = (d && (d.odds || d.pickcenter) || [])[0];
-    if (!odds || odds.overUnder == null) { marketStatus("Market lines: not posted yet. Type them, then Run.", true); return; }
-    const total = Number(odds.overUnder);
-    if (Number.isFinite(total)) setVal("ftMarket", total);
-    const h1 = total * (Number(lg.h1Share) || 0.48);
-    if (Number.isFinite(h1)) setVal("h1Market", Math.round(h1 * 2) / 2);
-    setTag("mAutoTag", Number.isFinite(total));
-    marketStatus("Total line loaded: " + total + ". 1H estimated from league share. Team lines need to be typed, then Run.", false);
+    if (odds && odds.overUnder != null) {
+      const total = Number(odds.overUnder);
+      if (Number.isFinite(total)) { setVal("ftMarket", total); filled = true; }
+      const h1 = total * (Number(lg.h1Share) || 0.48);
+      if (Number.isFinite(h1)) setVal("h1Market", Math.round(h1 * 2) / 2);
+    }
+    setTag("mAutoTag", filled);
+    marketStatus(filled ? "Total line loaded from ESPN. Team lines need to be typed, then Run." : "Market lines: not posted yet. Type them, then Run.", !filled);
   } catch (e) { marketStatus("Market lines: fetch failed (" + (e.message || e) + "). Type the lines.", true); }
 }
 
