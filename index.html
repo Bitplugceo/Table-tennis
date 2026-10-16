@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2972,7 +2973,7 @@ body.dark-mode .tracker-analytics-section-head {
   </div>
 </div>
 <header class="app-header">
-  <span class="brand-name">TheBetCeo ⚡️</span>
+  <span class="brand-name">Football Engine ⚡️</span>
 
   <span class="header-center">
     <button
@@ -4115,20 +4116,31 @@ async function fetchStats() {
   const btn = document.getElementById("fetchBtn"); btn.disabled = true;
   fetchSpin("Loading recent games for " + A + " and " + B + "...");
   const espn = lg.espn || "nfl";
+  const scoreOf = (v) => {
+    if (v == null) return NaN;
+    if (typeof v === "number") return v;
+    if (typeof v === "string") return Number(v);
+    if (typeof v === "object") return Number(v.value != null ? v.value : v.displayValue);
+    return NaN;
+  };
   async function teamGames(teamId) {
     const url = "https://site.api.espn.com/apis/site/v2/sports/football/" + espn + "/teams/" + teamId + "/schedule";
     const d = await fetchJson(url, "espn-schedule", 300000, 12000);
     const events = (d && d.events) || [];
-    return events.filter((ev) => ev.competitions && ev.competitions[0] && ev.competitions[0].status && ev.competitions[0].status.type && ev.competitions[0].status.type.completed).map((ev) => {
+    return events.filter((ev) => {
+      const c = ev.competitions && ev.competitions[0];
+      return c && c.status && c.status.type && c.status.type.completed;
+    }).map((ev) => {
       const c = ev.competitions[0];
       const home = c.competitors.find((x) => x.homeAway === "home"), away = c.competitors.find((x) => x.homeAway === "away");
+      if (!home || !away) return null;
       const isHome = String(home.team.id) === String(teamId);
       const me = isHome ? home : away, opp = isHome ? away : home;
       const ls = me.linescores || [], ols = opp.linescores || [];
-      const h1 = ls.length >= 2 ? (Number(ls[0].value) || 0) + (Number(ls[1].value) || 0) : null;
-      const h1o = ols.length >= 2 ? (Number(ols[0].value) || 0) + (Number(ols[1].value) || 0) : null;
-      return { gs: Number(me.score), ga: Number(opp.score), h1s: h1, h1a: h1o, t: Date.parse(ev.date), home: isHome ? 1 : 0 };
-    }).filter((g) => Number.isFinite(g.gs) && Number.isFinite(g.ga)).sort((a, b) => b.t - a.t).slice(0, 10);
+      const h1 = ls.length >= 2 ? scoreOf(ls[0].value != null ? ls[0].value : ls[0]) + scoreOf(ls[1].value != null ? ls[1].value : ls[1]) : null;
+      const h1o = ols.length >= 2 ? scoreOf(ols[0].value != null ? ols[0].value : ols[0]) + scoreOf(ols[1].value != null ? ols[1].value : ols[1]) : null;
+      return { gs: scoreOf(me.score), ga: scoreOf(opp.score), h1s: Number.isFinite(h1) ? h1 : null, h1a: Number.isFinite(h1o) ? h1o : null, t: Date.parse(ev.date), home: isHome ? 1 : 0 };
+    }).filter((g) => g && Number.isFinite(g.gs) && Number.isFinite(g.ga)).sort((a, b) => b.t - a.t).slice(0, 10);
   }
   try {
     const [pa, pb] = await Promise.all([teamGames(f.hid), teamGames(f.aid)]);
@@ -4167,19 +4179,16 @@ async function fetchLines() {
   if (!lg || !f) { marketStatus("Choose the matching fixture above.", true); return; }
   marketStatus("Market lookup: looking up " + f.home + " v " + f.away + "…");
   const espn = lg.espn || "nfl";
-  const day = new Date(f.start || Date.now());
-  const ymd = day.toISOString().slice(0, 10).replace(/-/g, "");
   try {
-    const d = await fetchJson("https://site.api.espn.com/apis/site/v2/sports/football/" + espn + "/scoreboard?dates=" + ymd, "espn-odds", 60000, 12000);
-    const ev = ((d && d.events) || []).find((e) => String(e.id) === String(f.eventId));
-    const odds = ev && ev.competitions && ev.competitions[0] && ev.competitions[0].odds && ev.competitions[0].odds[0];
-    if (!odds) { marketStatus("Market lines: not posted yet. Type them, then Run.", true); return; }
-    const total = odds.overUnder != null ? Number(odds.overUnder) : NaN;
-    const home = (ev.competitions[0].competitors || []).find((c) => c.homeAway === "home");
-    const away = (ev.competitions[0].competitors || []).find((c) => c.homeAway === "away");
+    const d = await fetchJson("https://site.api.espn.com/apis/site/v2/sports/football/" + espn + "/summary?event=" + f.eventId, "espn-odds", 60000, 12000);
+    const odds = (d && (d.odds || d.pickcenter) || [])[0];
+    if (!odds || odds.overUnder == null) { marketStatus("Market lines: not posted yet. Type them, then Run.", true); return; }
+    const total = Number(odds.overUnder);
     if (Number.isFinite(total)) setVal("ftMarket", total);
+    const h1 = total * (Number(lg.h1Share) || 0.48);
+    if (Number.isFinite(h1)) setVal("h1Market", Math.round(h1 * 2) / 2);
     setTag("mAutoTag", Number.isFinite(total));
-    marketStatus(Number.isFinite(total) ? "Total line loaded: " + total + ". Team lines are not on the scoreboard — type them if needed, then Run." : "Market lines: not posted yet. Type them, then Run.", !Number.isFinite(total));
+    marketStatus("Total line loaded: " + total + ". 1H estimated from league share. Team lines need to be typed, then Run.", false);
   } catch (e) { marketStatus("Market lines: fetch failed (" + (e.message || e) + "). Type the lines.", true); }
 }
 
