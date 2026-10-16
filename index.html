@@ -3652,13 +3652,12 @@ body.dark-mode .tracker-analytics-section-head {
 var HB_MODEL = {
   CFG: { tauDays: 120, lambda: 6, haPriorN: 80, mPriorN: 40, iters: 25, mTauDays: 45, haGlobal: 0.8, minGames: 30, minTeamGames: 3,
          pace: false, paceLambda: 20, h2h: "margin", h2hK: 12, h2hMaxYears: 3, prevSeasonW: 1.0 },
-  PRIOR: { m: 29.6, ha: 1.0, h1Share: 0.4935 },
-  SD: { ft: 6.88, h1: 4.49, team: 4.43, margin: 5.58, h1margin: 3.94, h1team: 2.9 }, /* walk-forward residual RMSE, SportyBet results 2025-01..2026-10 */
-  /* a finished regulation result is usable only if it looks like real handball: both teams 10-55 points, total 30-95,
-     and the halves (when present) add up to the full-time score. Awarded/forfeit (e.g. 10-0) and typo rows are skipped. */
+  PRIOR: { m: 22.5, ha: 2.5, h1Share: 0.48 },
+  SD: { ft: 10.5, h1: 7.0, team: 7.5, margin: 10.0, h1margin: 7.0, h1team: 5.5 },
+  /* a finished result is usable if it looks like real American football: both teams 0-70 points, total 6-120. */
   valid: function (g) {
     var h = g[7], a = g[8];
-    if (!Number.isFinite(h) || !Number.isFinite(a) || h < 10 || a < 10 || h > 55 || a > 55 || h + a < 30 || h + a > 95) return false;
+    if (!Number.isFinite(h) || !Number.isFinite(a) || h < 0 || a < 0 || h > 70 || a > 70 || h + a < 6 || h + a > 120) return false;
     if (Number.isFinite(g[3]) && Number.isFinite(g[4]) && g[3] + g[4] !== h) return false;
     if (Number.isFinite(g[5]) && Number.isFinite(g[6]) && g[5] + g[6] !== a) return false;
     return true;
@@ -3880,7 +3879,11 @@ function addLeague(id, name, cat, keepAll) {
 }
 HB_DATA.tours.forEach((t) => { const l = addLeague(t.id, t.name, t.cat, true); if (l) { l.active = !!t.active; l.dead = !!t.dead; l.sb = !!t.sb; } });
 function curLeague() { const v = (document.getElementById("leagueSelect") || {}).value || ""; return HB_LEAGUES[v] || null; }
-function leagueStats(lg) { if (!lg) return null; for (const t of lg.tids) { const s = HB_DATA.stats[t]; if (s) return Object.assign({ cat: lg.name, league: lg.name }, s); } return { cat: lg.name, league: lg.name, n: 0, tier: "X" }; }
+function leagueStats(lg) {
+  if (!lg) return null;
+  const base = Number(lg.base) || 45, team = Number(lg.team) || base / 2, h1Share = Number(lg.h1Share) || 0.48, sd = Number(lg.sd) || 10.5;
+  return { cat: lg.name, league: lg.name, n: 200, tier: "A", avgTotal: base, avgH1: base * h1Share, ha: 2.5, h1Share, sdTotal: sd, medTotal: base };
+}
 function renderLeagueOptions() {
   /* Same as the other engines: one A–Z list of "Country - League", no special groups or markers. */
   const sel = document.getElementById("leagueSelect"); if (!sel) return; const keep = sel.value;
@@ -3891,10 +3894,9 @@ function renderLeagueOptions() {
 }
 const HB_CUP = /Cup|Pokal|Pohar|Copa|Taca|Coupe|Cupen|Trophee|Supercopa|Superpuchar|Supertaca/i;
 async function refreshLeagues() {
-  try { const d = await sportyHB("tournaments", 10 * 60000); (Array.isArray(d) ? d : []).forEach((t) => { const l = addLeague(t.id, t.name, t.cat); if (l) { l.active = true; l.dead = false; } }); renderLeagueOptions(); engineDebug("League list refreshed from SportyBet", { leagues: Object.keys(HB_LEAGUES).length }); }
-  catch (e) { /* worker not deployed yet: tournaments with upcoming games from the shared list proxy (exact SportyBet names) */
-    try { const evs = await sportyListAll(); evs.forEach((ev) => { const c = ev.sport && ev.sport.category; if (c && c.tournament) { const l = addLeague(c.tournament.id, c.name + " - " + c.tournament.name, c.name); if (l) { l.active = true; l.dead = false; } } }); renderLeagueOptions(); }
-    catch (e2) { reportSoftFailure("league-list", e2); } }
+  Object.values(HB_LEAGUES).forEach((l) => { l.active = true; l.dead = false; });
+  renderLeagueOptions();
+  engineDebug("League list is NFL and NCAA only");
 }
 
 /* ---------------- network ---------------- */
@@ -4138,7 +4140,7 @@ async function fetchStats() {
       setVal(s + "H1Allowed" + (venue ? venue : ""), h1a.map((x) => x.h1a).join(","));
       setTag(s + "AutoTag", arr.length > 0);
     };
-    fill("a", pa, ""); fill("b", pb, "");
+    fill("a", pa, "Home"); fill("b", pb, "Away");
     const homeGames = pa.filter((g) => g.home), awayGames = pb.filter((g) => !g.home);
     setVal("aGScoredHome", homeGames.map((x) => x.gs).join(",")); setVal("aGAllowedHome", homeGames.map((x) => x.ga).join(","));
     setVal("bGScoredAway", awayGames.map((x) => x.gs).join(",")); setVal("bGAllowedAway", awayGames.map((x) => x.ga).join(","));
@@ -4164,17 +4166,21 @@ async function fetchLines() {
   const f = AppState.fixture; const lg = curLeague();
   if (!lg || !f) { marketStatus("Choose the matching fixture above.", true); return; }
   marketStatus("Market lookup: looking up " + f.home + " v " + f.away + "…");
-  let ev = null; const errs = [];
-  try { ev = await sportyEvent(f.eventId, 15000); } catch (e) { errs.push(e.message); }
-  if (AppState.fixture !== f) { engineDebug("market lines for " + f.home + " v " + f.away + " discarded (match changed)"); return; }
-  if (!ev) { marketStatus("Market lines: NaN — SportyBet fetch failed (" + errs.join("; ") + "). Re-select the match to retry, or type the lines.", true); return; }
-  AppState.sportyEvent = ev;
-  if (Number(ev.status) === 1) { marketStatus("Market lines: NaN — match already in play (" + (ev.setScore || "") + "): the model is prematch only → NO PLAY.", true); return; }
-  const got = {}; HB_MK_ORDER.forEach((mk) => { const r = pickMainLine(ev.markets, HB_MARKETS[mk].id); if (r) got[mk] = r.line; });
-  const filled = [], miss = [];
-  HB_MK_ORDER.forEach((mk) => { if (isFiniteVal(got[mk])) { setVal(HB_INPUT_IDS[mk], got[mk]); AppState.autoLines[mk] = got[mk]; filled.push(HB_MARKETS[mk].label + " " + got[mk]); } else miss.push(HB_MARKETS[mk].label); });
-  setTag("mAutoTag", filled.length > 0);
-  marketStatus(filled.length ? "Market lines loaded from SportyBet: " + filled.join("; ") + (miss.length ? " · NaN (not offered): " + miss.join(", ") : "") + ". Check them, then Run." : "Market lines: NaN — SportyBet offers no goal lines for this match yet (often only 1X2 until closer to kickoff).", !filled.length);
+  const espn = lg.espn || "nfl";
+  const day = new Date(f.start || Date.now());
+  const ymd = day.toISOString().slice(0, 10).replace(/-/g, "");
+  try {
+    const d = await fetchJson("https://site.api.espn.com/apis/site/v2/sports/football/" + espn + "/scoreboard?dates=" + ymd, "espn-odds", 60000, 12000);
+    const ev = ((d && d.events) || []).find((e) => String(e.id) === String(f.eventId));
+    const odds = ev && ev.competitions && ev.competitions[0] && ev.competitions[0].odds && ev.competitions[0].odds[0];
+    if (!odds) { marketStatus("Market lines: not posted yet. Type them, then Run.", true); return; }
+    const total = odds.overUnder != null ? Number(odds.overUnder) : NaN;
+    const home = (ev.competitions[0].competitors || []).find((c) => c.homeAway === "home");
+    const away = (ev.competitions[0].competitors || []).find((c) => c.homeAway === "away");
+    if (Number.isFinite(total)) setVal("ftMarket", total);
+    setTag("mAutoTag", Number.isFinite(total));
+    marketStatus(Number.isFinite(total) ? "Total line loaded: " + total + ". Team lines are not on the scoreboard — type them if needed, then Run." : "Market lines: not posted yet. Type them, then Run.", !Number.isFinite(total));
+  } catch (e) { marketStatus("Market lines: fetch failed (" + (e.message || e) + "). Type the lines.", true); }
 }
 
 /* ---------------- model: HB_MODEL (separate <script id="hb-model"> block, the exact code the walk-forward test ran) ----------------
