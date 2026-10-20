@@ -4168,15 +4168,22 @@ async function fetchStats(_retry) {
 }
 /* ---------------- SportyBet lines (238 total, 247 gamenr=1 only) ---------------- */
 function pickMainLine(markets, id, gameOne) {
-  const cands = (markets || []).filter((m) => Number(m.id) === id && String(m.status == null ? 0 : m.status) === "0").filter((m) => {
-    const sp = String(m.specifier || ""); if (id === 247) return /(^|\|)gamenr=1(\||$)/.test(sp); return /(^|\|)total=/.test(sp);
+  const cands = (markets || []).filter((m) => Number(m.id) === Number(id) && String(m.status == null ? 0 : m.status) === "0").filter((m) => {
+    const sp = String(m.specifier || "").toLowerCase().replace(/[;,]/g, "|");
+    if (Number(id) === 247) return /(^|\|)gamenr\s*=\s*1(\||$)/.test(sp) || /(^|\|)game(?:nr|number)\s*=\s*1(\||$)/.test(sp);
+    return /(^|\|)total\s*=/.test(sp);
   }).map((m) => {
-    const tot = Number((String(m.specifier).match(/total=([\d.]+)/) || [])[1]);
-    const o = (m.outcomes || []).find((x) => /^over/i.test(x.desc)), u = (m.outcomes || []).find((x) => /^under/i.test(x.desc));
-    const oo = Number(o && o.odds), uo = Number(u && u.odds);
-    return Number.isFinite(tot) && oo > 1 && uo > 1 ? { line: tot, bal: Math.abs(oo - uo), over: oo, under: uo } : null; /* balanced prices locate the main line; the prices are kept for the EV gate */
+    const sp = String(m.specifier || "").toLowerCase();
+    const match = sp.match(/(?:^|[|;,])total\s*=\s*([0-9]+(?:\.[0-9]+)?)/) || sp.match(/(?:^|[|;,])(?:line|points)\s*=\s*([0-9]+(?:\.[0-9]+)?)/);
+    const tot = match ? Number(match[1]) : NaN;
+    const outs = Array.isArray(m.outcomes) ? m.outcomes : [];
+    const o = outs.find((x) => /^(over|more|above)\b/i.test(String(x.desc || x.name || x.label || "")));
+    const u = outs.find((x) => /^(under|less|below)\b/i.test(String(x.desc || x.name || x.label || "")));
+    const oo = Number(o && (o.odds ?? o.price)), uo = Number(u && (u.odds ?? u.price));
+    return Number.isFinite(tot) && oo > 1 && uo > 1 ? { line: tot, bal: Math.abs(oo - uo), over: oo, under: uo } : null;
   }).filter(Boolean);
-  cands.sort((a, b) => a.bal - b.bal || a.line - b.line); return cands[0] ? { line: cands[0].line, over: cands[0].over, under: cands[0].under } : null;
+  cands.sort((a, b) => a.bal - b.bal || a.line - b.line);
+  return cands[0] ? { line: cands[0].line, over: cands[0].over, under: cands[0].under } : null;
 }
 async function fetchLines() {
   const f = AppState.fixture; const lg = curLeague();
@@ -4202,7 +4209,7 @@ async function fetchLines() {
   if (ft) { setVal("ftMarket", ft.line); filled.push("Total Points " + ft.line); }
   if (h1) { setVal("h1Market", h1.line); filled.push("1st Game Points " + h1.line); }
   setTag("mAutoTag", filled.length > 0);
-  marketStatus(filled.length ? "Market lines loaded from SportyBet: " + filled.join("; ") + (h1 ? "" : " · 1st Game Points: NaN (not open yet)") + (ft ? "" : " · Total Points: NaN (not open yet)") + ". Check them, then Run." : "Market lines: NaN (not open yet)" + (/Czech Liga Pro|TT Elite/.test(lg.name) ? " — this league opens Total / 1st Game lines only once the match is live; the model is prematch, so it stays NO PLAY unless you type a line." : "."), !filled.length);
+  marketStatus(filled.length ? "Market lines loaded from SportyBet: " + filled.join("; ") + (h1 ? "" : " · 1st Game Points: LINE NOT FOUND (SportyBet may not offer it, or its market format was not recognized)") + (ft ? "" : " · Total Points: NaN (not open yet)") + ". Check them, then Run." : "Market lines: NaN (not open yet)" + (/Czech Liga Pro|TT Elite/.test(lg.name) ? " — this league opens Total / 1st Game lines only once the match is live; the model is prematch, so it stays NO PLAY unless you type a line." : "."), !filled.length);
 }
 
 /* ---------------- model ---------------- */
@@ -4922,7 +4929,7 @@ function renderTracker() {
   const all = g_tracker.picks, activePicks = all.filter((p) => !p.archived), archivedCount = all.length - activePicks.length;
   const r = _rec(activePicks), pend = activePicks.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "pending"), live = pend.filter((p) => g_liveGameStatus.has(String(p.eventId))).length;
   const leanAll = activePicks.filter((p) => p.lean), leanW = leanAll.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "win").length, leanL = leanAll.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "loss").length, voids = activePicks.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "void").length;
-  sumEl.innerHTML = `<span id="trackerSummaryCounts">${activePicks.length} active picks • ${archivedCount} archived • ${live} live • ${pend.length - live} pending • ${r.wins} wins • ${r.losses} losses${r.pushes ? " • " + r.pushes + " pushes" : ""}${voids ? " • " + voids + " void" : ""}${leanAll.length ? " • lean " + leanW + "W-" + leanL + "L of " + leanAll.length : ""}</span>`;
+  sumEl.innerHTML = `<span id="trackerSummaryCounts">${live} live • ${pend.length - live} pending • ${r.wins} wins • ${r.losses} losses${r.pushes ? " • " + r.pushes + " pushes" : ""}${voids ? " • " + voids + " void" : ""}${leanAll.length ? " • lean " + leanW + "W-" + leanL + "L of " + leanAll.length : ""}</span>`;
   const fill = document.getElementById("enginePerfFill"), pctEl = document.getElementById("enginePerfPct"); if (fill) fill.style.width = (isFinite(r.winPct) ? Math.round(r.winPct) : 0) + "%"; if (pctEl) pctEl.textContent = isFinite(r.winPct) ? Math.round(r.winPct) + "%" : "NaN";
   syncTrackerModalView(); updateTrackerInsightsButton();
   if (!isTrackerPicksView()) {
