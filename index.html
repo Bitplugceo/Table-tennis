@@ -1,4 +1,3 @@
-K
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5264,5 +5263,277 @@ if (document.readyState === "loading") document.addEventListener("DOMContentLoad
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 })();
 </script>
+<style id="ttApStyle">
+#ttApModal{position:fixed;inset:0;z-index:10050;background:var(--bg,#efefef);color:var(--text,#1f2430);display:none;flex-direction:column;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+#ttApModal.open{display:flex}
+.ttap-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;background:var(--tracker-head-bg,#3a404c);color:#fff;font-weight:900}
+.ttap-head button{background:none;border:0;color:#fff;font-size:18px;margin:0;width:auto}
+.ttap-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:10px 10px 40px}
+.ttap-card{background:var(--panel,#fff);border:1px solid var(--panel-border,#dedede);border-radius:10px;padding:10px;margin-bottom:10px}
+.ttap-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:5px 0}
+.ttap-btn{border:0;border-radius:8px;padding:8px 11px;font-weight:800;font-size:12px;background:#3a404c;color:#fff;margin:0;width:auto;min-width:0}
+.ttap-btn.go{background:#1f9d55}.ttap-btn.warn{background:#d91f26}.ttap-btn.alt{background:#d4af37;color:#111}
+.ttap-btn.day{background:var(--panel-soft-2,#eceff3);color:var(--text,#222)}.ttap-btn.day.active{background:#d91f26;color:#fff}
+#ttApLeagues{max-height:220px;overflow-y:auto;border:1px solid var(--panel-border,#dedede);border-radius:8px;margin-top:6px}
+.ttap-lg{display:flex;gap:8px;align-items:center;padding:7px 8px;border-bottom:1px solid var(--panel-border,#eee);font-size:13px}
+.ttap-lg input{width:auto;margin:0}
+.ttap-wrap{overflow-x:auto}
+.ttap-tbl{width:100%;border-collapse:collapse;font-size:11px}
+.ttap-tbl th{background:var(--table-head,#3a404c);color:#fff;padding:5px 4px;text-align:left;white-space:nowrap}
+.ttap-tbl td{padding:5px 4px;border-bottom:1px solid var(--table-border,#dfe2e7);vertical-align:top}
+#ttApN{width:64px}
+</style>
+<script id="ttAutoParlay">
+/* AUTO PARLAY (20 Oct 2026). Separate module: reuses the engine's own evaluate()/computeModel()/ttHidden gates, fixtures, SportyBet lines and tracker.
+   It does not edit any engine function. State lives in localStorage TT_AUTO_PARLAY_V1 and is saved after every match, so it resumes after minimise/exit. */
+(function () {
+try {
+const KEY = "TT_AUTO_PARLAY_V1", CONC = 3, $ = (id) => document.getElementById(id), esc = (s) => escapeHtml(s);
+const DEF = () => ({ n: 8, day: 0, leagues: [] });
+let S = { cfg: DEF(), cache: {}, queue: [], parlay: null, run: false }, pumping = false, busy = false; const inflight = new Set(), HC = {};
+function load() {
+  try { const j = JSON.parse(localStorage.getItem(KEY) || "null"); if (j && j.cache) S = Object.assign(S, j); } catch (_e) {}
+  S.cfg = Object.assign(DEF(), S.cfg || {});
+  const cut = Date.now() - 12 * 3600000; Object.keys(S.cache).forEach((k) => { if (!(S.cache[k].start > cut)) delete S.cache[k]; });
+  S.queue = (S.queue || []).filter((f) => f.start > Date.now());
+}
+function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { addIssue("Auto Parlay save failed: " + e.message); } }
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const setMsg = (t) => { const el = $("ttApMsg"); if (el) el.textContent = t || ""; };
+const lgList = () => Object.values(TT_LEAGUES).map((l) => ({ l, n: Object.values(l.byBo).reduce((s, d) => s + d.n, 0) })).sort((a, b) => b.n - a.n || a.l.name.localeCompare(b.l.name));
+const inPool = (r) => { const b = watDayBounds(S.cfg.day); return S.cfg.leagues.includes(r.lk) && r.start >= b[0] && r.start < b[1]; };
+const pool = () => Object.values(S.cache).filter(inPool).sort((a, b) => a.start - b.start);
+const qPool = () => S.queue.filter(inPool);
+
+/* ---- fixtures (headless copy of loadFixtures) ---- */
+async function fetchFixtures(lg) {
+  const b = watDayBounds(S.cfg.day), s = b[0], e = b[1], out = new Map(), errs = [];
+  try {
+    const d = await sportyTT("list?tids=" + encodeURIComponent(lg.tids.join(",")), 60000);
+    (Array.isArray(d) ? d : d.tournaments || []).forEach((t) => (t.events || []).forEach((ev) => {
+      const c = ev.sport && ev.sport.category, nm = normLeagueName((c && c.name) + " - " + (c && c.tournament && c.tournament.name)), ms = String(ev.matchStatus || "");
+      if (nm !== lg.name || ev.estimateStartTime < s || ev.estimateStartTime >= e) return;
+      if (ev.status !== 0 || ev.estimateStartTime <= Date.now() || (/ended|closed|cancel|abandon|walkover|retired|set \d|live|break|interrupt/i.test(ms) && !/not start/i.test(ms))) return;
+      out.set(ev.eventId, { eventId: ev.eventId, home: ev.homeTeamName, away: ev.awayTeamName, start: ev.estimateStartTime, bo: NaN });
+    }));
+  } catch (er) { errs.push(lg.name + ": " + er.message); }
+  if (lg.gismo) {
+    const utids = srUtidsOf(lg);
+    for (const ds of new Set([utcDateStr(s), utcDateStr(e - 1)])) {
+      try {
+        const d = await gismo("sport_matches/20/" + ds + "/0", 60000);
+        (d.sport && d.sport.realcategories || []).forEach((c) => (c.tournaments || []).forEach((t) => {
+          if (!utids.includes(String(t._utid))) return;
+          (t.matches || []).forEach((m) => {
+            const st = m._dt.uts * 1000; if (st < s || st >= e || st <= Date.now() || (m.status && m.status.name && !/^not started$/i.test(m.status.name)) || (m.matchstatus && m.matchstatus !== "upcoming") || m.cancelled || m.walkover || m.postponed || m.removed || m.retired) return;
+            const id = "sr:match:" + m._id; if (!out.has(id)) out.set(id, { eventId: id, home: m.teams.home.name, away: m.teams.away.name, start: st, bo: Number(m.bestofsets) || NaN });
+          });
+        }));
+      } catch (er) { errs.push(lg.name + ": " + er.message); }
+    }
+  }
+  return { list: [...out.values()], errs };
+}
+/* ---- SportyBet lines (headless copy of fetchLines) ---- */
+async function getLines(f, fresh) {
+  let ev = null;
+  for (const live of [0, 1]) { try { ev = await sportyTT("event?id=" + encodeURIComponent(f.eventId) + "&live=" + live, fresh ? 1 : 15000); if (ev && ev.markets && ev.markets.length) break; } catch (_e) {} }
+  if ((!ev || !(ev.markets || []).length) && /^sr:match:\d+$/.test(f.eventId)) { try { ev = await sportyEventLegacy(f.eventId); } catch (_e) {} }
+  if (!ev || !(ev.markets || []).length) return { err: "SportyBet lines unavailable" };
+  const inPlay = Number(ev.status) === 1 && (String(ev.setScore || "0:0") !== "0:0" || (ev.gameScore || []).some((g) => String(g) !== "0:0"));
+  if (inPlay) return { err: "match already in play", started: true };
+  let bo = NaN; const bm = (ev.markets || []).find((m) => (Number(m.id) === 199 || Number(m.id) === 241) && /bestof:(\d)/.test(String(m.specifier || "")));
+  if (bm) { const v = Number(String(bm.specifier).match(/bestof:(\d)/)[1]); if (Number.isFinite(v)) bo = v; }
+  return { ft: pickMainLine(ev.markets, 238), h1: pickMainLine(ev.markets, 247), bo };
+}
+/* league history is loaded ONCE per league and shared by every match of that league */
+function histFor(lg) {
+  const c = HC[lg.key]; if (c && Date.now() - c.t < 20 * 60000) return c.p;
+  const p = loadHistory(lg, TT_CONFIG.historyDays, [], () => {}); HC[lg.key] = { t: Date.now(), p };
+  p.catch(() => { if (HC[lg.key] && HC[lg.key].p === p) delete HC[lg.key]; }); return p;
+}
+/* same correlation guard as the engine (trackerCorrelationBlock), but for an explicit fixture */
+function guard(lg, f) {
+  const day = watDayKey(f.start), nA = normName(f.home), nB = normName(f.away), pair = [nA, nB].sort().join("|"), out = {};
+  ["ft", "h1"].forEach((mk) => {
+    const same = g_tracker.picks.filter((p) => !p.lean && p.resultStatus !== "void" && p.marketKey === mk && (p.leagueKey || leagueKeyOf(p.league)) === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== f.eventId);
+    const names = (p) => [normName(p.homeTeam), normName(p.awayTeam)];
+    const pairN = same.filter((p) => names(p).slice().sort().join("|") === pair).length, plA = same.filter((p) => names(p).includes(nA)).length, plB = same.filter((p) => names(p).includes(nB)).length;
+    if (pairN >= TT_CONFIG.maxPairPicksPerDay) out[mk] = "Correlation guard: " + pairN + " pick(s) already on this pairing today.";
+    else if (Math.max(plA, plB) >= TT_CONFIG.maxPlayerPicksPerDay) out[mk] = "Correlation guard: " + TT_CONFIG.maxPlayerPicksPerDay + "+ picks today already involve one of these players.";
+  });
+  return out;
+}
+function trackIt(r, f, lg, plays) {
+  const r1 = (v) => Math.round(v * 10) / 10;
+  plays.forEach((p) => {
+    const sig = f.eventId + "|" + p.mk, ex = g_tracker.picks.find((x) => x.signature === sig);
+    const fields = { bo: r.bo, line: p.line, side: p.side, pick: p.pick, grade: p.grade, mv: TT_MODEL_VERSION, proj: r1(p.proj), edge: r1(p.edge), prob: Math.round(p.pSide * 1000) / 1000, odds: p.odds, ev: Math.round(p.ev * 1000) / 1000 };
+    if (ex) { if (ex.resultStatus === "pending" && !ex.lean && Date.now() < f.start) { Object.assign(ex, fields); ex.synced = false; } return; }
+    g_tracker.picks.unshift(Object.assign({ signature: sig, eventId: f.eventId, leagueKey: lg.key, league: lg.name, homeTeam: f.home, awayTeam: f.away, pairKey: [normName(f.home), normName(f.away)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.mk, market: TT_MARKETS[p.mk].label, resultStatus: "pending", actual: NaNv, build: TT_BUILD }, fields));
+  });
+  trackerSave(); renderTracker(); syncPicksToWorker(); r.tracked = true;
+}
+/* ---- one match, exactly the manual Fetch Stats + Run path, no DOM ---- */
+async function predictOne(f) {
+  const lg = TT_LEAGUES[f.lk], r = { eventId: f.eventId, lk: f.lk, league: lg.name, home: f.home, away: f.away, start: f.start, at: Date.now() };
+  if (f.start <= Date.now() + 60000) { r.status = "started"; r.reason = "already started or about to"; return r; }
+  const ln = await getLines(f);
+  if (ln.err) { r.status = ln.started ? "started" : "noline"; r.retry = !ln.started; r.reason = ln.err; return r; }
+  if (!ln.ft && !ln.h1) { r.status = "noline"; r.retry = true; r.reason = "no prematch line open yet"; return r; }
+  const bo = Number.isFinite(ln.bo) ? ln.bo : Number.isFinite(f.bo) ? f.bo : defaultBo(lg); r.bo = bo;
+  const L = leagueStats(lg, bo); if (!L) { r.status = "noplay"; r.reason = "no " + lg.name + " data for best-of-" + bo; return r; }
+  const H = await histFor(lg);
+  if (!H.list.length) { r.status = "noplay"; r.retry = true; r.reason = "no results history loaded (" + (H.errs || []).slice(0, 1).join("") + ")"; return r; }
+  const same = H.list.filter((m) => m.bo === bo), nA = normName(f.home), nB = normName(f.away), inv = (m, n) => normName(m.h) === n || normName(m.a) === n;
+  const view = (n, nm) => same.filter((m) => inv(m, n)).slice(0, TT_CONFIG.lastN).map((m) => playerView(m, nm)).filter(Boolean);
+  const pa = view(nA, f.home), pb = view(nB, f.away);
+  if (pa.length < TT_CONFIG.minGames || pb.length < TT_CONFIG.minGames) { r.status = "noplay"; r.reason = "min-games " + pa.length + "/" + pb.length + " (need " + TT_CONFIG.minGames + ")"; return r; }
+  await tick(); /* everything below is synchronous: model + guard + tracker run as one atomic step, so parallel matches cannot race the correlation guard */
+  const mkP = (a) => ({ ok: true, n: a.length, games: a.map((x) => ({ won: x.won, lost: x.lost, total: x.ptsW + x.ptsL, sets: x.won + x.lost, set1: x.g1W + x.g1L })) });
+  const A = mkP(pa), B = mkP(pb);
+  const h2 = same.filter((m) => { const x = normName(m.h), y = normName(m.a); return (x === nA && y === nB) || (x === nB && y === nA); }).slice(0, 10).map((m) => playerView(m, f.home)).filter(Boolean).map((x) => ({ day: Math.floor((x.t + 3600000) / 86400000), a: x.won, b: x.lost }));
+  const useH = h2hEff(h2) >= TT_CONFIG.h2hMinEff, now = Date.now();
+  const model = computeModel(L, A, B, useH ? h2 : null, bo); model.hidden = buildHidden(H.list, bo, f.home, f.away, now, useH, lg);
+  const vA = sd(A.games.map((g) => g.total)), vB = sd(B.games.map((g) => g.total)), cap = TT_CONFIG.volatilityMult * L.sdTotal;
+  const blk = H.truncated ? "partial history load" : (vA > cap || vB > cap) ? "Volatility guard: SD " + fmt1(vA) + "/" + fmt1(vB) + " > " + fmt1(cap) : null;
+  const cg = guard(lg, f), legs = [];
+  ["ft", "h1"].forEach((k) => {
+    const o = ln[k], line = o ? Number(o.line) : NaNv, p = evaluate(k, L, model, line, { blockReason: cg[k] || blk, odds: o || null });
+    if (p.pick === "NO PLAY") legs.push({ mk: k, no: p.reason, line });
+    else legs.push({ mk: k, pick: p.pick, side: p.side, line: p.line, proj: p.proj, edge: p.edge, pSide: p.pSide, pPush: p.pPush || 0, odds: p.oddsUsed, ev: p.ev, grade: p.grade, pAdj: 0.5 + TT_CONFIG.modelShrink * (p.pSide - 0.5) });
+  });
+  r.legs = legs; const plays = legs.filter((x) => x.pick).sort((a, b) => b.pAdj - a.pAdj || b.ev - a.ev);
+  if (plays.length) { r.status = "play"; r.best = plays[0]; trackIt(r, f, lg, plays); }
+  else { r.status = "noplay"; r.reason = legs.map((x) => (x.mk === "ft" ? "Total: " : "G1: ") + x.no).join(" | ").slice(0, 300); if (H.truncated) r.retry = true; }
+  return r;
+}
+/* ---- resumable parallel queue (network overlaps, model math is serialised) ---- */
+async function worker() {
+  while (S.run) {
+    const f = S.queue.find((x) => !inflight.has(x.eventId)); if (!f) return; inflight.add(f.eventId);
+    try { S.cache[f.eventId] = await predictOne(f); }
+    catch (e) { const lg = TT_LEAGUES[f.lk]; S.cache[f.eventId] = { eventId: f.eventId, lk: f.lk, league: lg ? lg.name : "", home: f.home, away: f.away, start: f.start, at: Date.now(), status: "error", retry: true, reason: String(e && e.message || e).slice(0, 160) }; }
+    S.queue = S.queue.filter((x) => x.eventId !== f.eventId); inflight.delete(f.eventId); save(); render(); await tick();
+  }
+}
+async function pump() {
+  if (pumping) return; pumping = true;
+  try { do { await Promise.all(Array.from({ length: CONC }, worker)); } while (S.run && S.queue.some((f) => !inflight.has(f.eventId))); } finally { pumping = false; }
+  if (!S.queue.length && S.run) { S.run = false; save(); setMsg("Done. Press Build parlay."); }
+  render();
+}
+async function start() {
+  const lgs = S.cfg.leagues.map((k) => TT_LEAGUES[k]).filter(Boolean); if (!lgs.length) { setMsg("Pick at least one league first."); return; }
+  S.run = true; save(); render(); setMsg("Fetching fixtures…"); let added = 0, skipped = 0; const errs = [];
+  const res = await Promise.all(lgs.map((lg) => fetchFixtures(lg).then((x) => ({ lg, x })).catch((e) => ({ lg, x: { list: [], errs: [e.message] } }))));
+  res.forEach((o) => { errs.push(...o.x.errs); o.x.list.forEach((f) => {
+    f.lk = o.lg.key; const c = S.cache[f.eventId];
+    if (c && !(c.retry && Date.now() - c.at > 8 * 60000)) { skipped++; return; } /* already predicted: never redone (no-line ones are retried after 8 min) */
+    if (c) delete S.cache[f.eventId];
+    if (!S.queue.some((q) => q.eventId === f.eventId)) { S.queue.push(f); added++; }
+  }); });
+  S.queue.sort((a, b) => a.start - b.start); save();
+  setMsg(added + " new match(es) queued, " + skipped + " already in memory (skipped)." + (errs.length ? " Partial: " + errs.slice(0, 2).join("; ") : ""));
+  if (!S.queue.length) { S.run = false; save(); } render(); pump();
+}
+const requeue = (r) => { delete S.cache[r.eventId]; if (!S.queue.some((q) => q.eventId === r.eventId)) S.queue.push({ eventId: r.eventId, home: r.home, away: r.away, start: r.start, bo: r.bo, lk: r.lk }); };
+/* ---- build: verify live lines, keep only still-valid full plays, strongest first, never forced ---- */
+async function build() {
+  if (busy) return; busy = true; setMsg("Verifying lines…");
+  try {
+    const now = Date.now(), c = pool().filter((r) => r.status === "play" && r.best && r.start > now + 180000);
+    if (!c.length) { setMsg("No full plays in memory for these leagues/day yet. Press Start first."); return; }
+    const ok = []; let moved = 0, dropped = 0, i = 0;
+    const w = async () => { while (i < c.length) {
+      const r = c[i++], ln = await getLines({ eventId: r.eventId }, true), o = ln && ln[r.best.mk];
+      if (ln.err) { dropped++; continue; }
+      if (!o || Number(o.line) !== Number(r.best.line)) { requeue(r); moved++; continue; }
+      const od = Number(r.best.side === "OVER" ? o.over : o.under), pp = r.best.pPush || 0;
+      const ev = r.best.pAdj * (1 - pp) * od + pp - 1;
+      if (!(od > 1) || ev < TT_CONFIG.minEV) { dropped++; continue; }
+      r.best.odds = od; r.best.ev = ev; ok.push(r);
+    } };
+    await Promise.all([w(), w(), w(), w()]);
+    ok.sort((a, b) => b.best.pAdj - a.best.pAdj || b.best.ev - a.best.ev);
+    const used = new Set(), sel = [];
+    for (const r of ok) { if (sel.length >= S.cfg.n) break; const a = normName(r.home), b = normName(r.away); if (used.has(a) || used.has(b)) continue; used.add(a); used.add(b); sel.push(r); } /* 1 leg per match and per player */
+    S.parlay = { n: S.cfg.n, at: Date.now(), found: ok.length, legs: sel.map((r) => Object.assign({ eventId: r.eventId, league: r.league, home: r.home, away: r.away, start: r.start }, r.best)) };
+    if (moved) { S.run = true; }
+    save(); render();
+    setMsg((sel.length < S.cfg.n ? "Only " + sel.length + " of " + S.cfg.n + " legs cleared the gates. Not forcing it. " : "Parlay built. ") + (moved ? moved + " line(s) moved, re-predicting; Build again after. " : "") + (dropped ? dropped + " dropped (price/line gone)." : ""));
+    if (moved) pump();
+  } finally { busy = false; }
+}
+/* ---- UI ---- */
+function parlayHtml() {
+  const P = S.parlay; if (!P) return "";
+  const now = Date.now(), od = P.legs.reduce((s, g) => s * Number(g.odds), 1), pr = P.legs.reduce((s, g) => s * g.pAdj, 1);
+  const rows = P.legs.map((g, i) => "<tr><td>" + (i + 1) + "</td><td>" + esc(fmtT(g.start)) + (g.start <= now ? "<br><b style='color:#d91f26'>STARTED</b>" : "") + "</td><td>" + esc(g.league) + "</td><td><b>" + esc(g.home) + "</b> vs <b>" + esc(g.away) + "</b></td><td>" + esc(TT_MARKETS[g.mk].label) + "</td><td><b>" + esc(g.pick) + "</b></td><td>" + Number(g.odds).toFixed(2) + "</td><td>" + esc(g.grade) + "</td><td>" + Math.round(g.pAdj * 100) + "%</td></tr>").join("");
+  return "<div class='ttap-card'><b>Parlay: " + P.legs.length + " of " + P.n + " legs</b> · built " + esc(fmtT(P.at)) + "<div class='ttap-wrap' style='margin-top:6px'><table class='ttap-tbl'><tr><th>#</th><th>Time</th><th>League</th><th>Match</th><th>Market</th><th>Pick</th><th>Odds</th><th>Gr</th><th>Win%</th></tr>" + (rows || "<tr><td colspan='9'>No legs cleared the gates.</td></tr>") + "</table></div>" + (P.legs.length ? "<div style='margin-top:8px;font-size:12px'><b>Total odds ≈ " + od.toFixed(2) + "</b> · model hit chance ≈ <b>" + (pr * 100).toFixed(1) + "%</b> (every leg must win; legs already shrunk 25%)</div>" : "") + "</div>";
+}
+function listHtml(P, q) {
+  const rows = P.map((r) => [r.start, r]).concat(q.map((f) => [f.start, Object.assign({}, f, { league: (TT_LEAGUES[f.lk] || {}).name || "", status: "queued" })])).sort((a, b) => a[0] - b[0]).map((x) => x[1]).map((r) => {
+    let res; if (r.status === "play") res = "<b>" + esc(r.best.pick) + "</b> @" + Number(r.best.odds).toFixed(2) + " · " + esc(r.best.grade) + " · " + Math.round(r.best.pAdj * 100) + "%" + (r.tracked ? " ✓" : "");
+    else if (r.status === "queued") res = "⏳ queued";
+    else res = "<span style='opacity:.75' title='" + esc(r.reason || "") + "'>" + (r.status === "noline" || r.status === "error" ? "⏳ " : "") + "NO PLAY · " + esc(String(r.reason || "").slice(0, 70)) + "</span>";
+    return "<tr><td>" + esc(fmtT(r.start)) + "</td><td>" + esc(r.league) + "</td><td>" + esc(r.home) + " vs " + esc(r.away) + "</td><td>" + res + "</td></tr>";
+  }).join("");
+  return "<table class='ttap-tbl'><tr><th>Time</th><th>League</th><th>Match</th><th>Result</th></tr>" + (rows || "<tr><td colspan='4'>Nothing yet. Pick leagues and press Start.</td></tr>") + "</table>";
+}
+function renderLeagues() {
+  const q = String(($("ttApSearch") || {}).value || "").toLowerCase(), el = $("ttApLeagues"); if (!el) return;
+  el.innerHTML = lgList().filter((x) => x.l.name.toLowerCase().includes(q)).map((x) => "<label class='ttap-lg'><input type='checkbox' data-k='" + x.l.key + "'" + (S.cfg.leagues.includes(x.l.key) ? " checked" : "") + "><span style='flex:1'>" + esc(x.l.name) + "</span><span style='opacity:.6;font-size:10px'>" + (x.n < 100 ? "thin data · " : "") + "n=" + x.n + "</span></label>").join("");
+}
+function render() {
+  const b = $("ttApBtn"); if (b) b.textContent = S.queue.length ? "🎯" + S.queue.length : "🎯";
+  const m = $("ttApModal"); if (!m || !m.classList.contains("open")) return;
+  const P = pool(), q = qPool(), plays = P.filter((r) => r.status === "play" && r.start > Date.now()).length;
+  $("ttApStat").textContent = P.length + " done · " + q.length + " queued · " + plays + " plays" + (S.run ? " · ⏳" : "");
+  $("ttApRun").textContent = S.run ? "⏸ Pause" : "▶ Start";
+  if (document.activeElement !== $("ttApN")) $("ttApN").value = S.cfg.n;
+  $("ttApD0").classList.toggle("active", S.cfg.day === 0); $("ttApD1").classList.toggle("active", S.cfg.day === 1);
+  $("ttApLgC").textContent = S.cfg.leagues.length; $("ttApParlay").innerHTML = parlayHtml(); $("ttApList").innerHTML = listHtml(P, q);
+}
+function buildModal() {
+  if ($("ttApModal")) return; const m = document.createElement("div"); m.id = "ttApModal";
+  m.innerHTML = "<div class='ttap-head'><span>🎯 Auto Parlay</span><span id='ttApStat' style='font-size:11px'></span><button type='button' id='ttApX'>✕</button></div><div class='ttap-body'><div class='ttap-card'>" +
+    "<div class='ttap-row'><b>Legs</b><input id='ttApN' type='number' min='2' max='30' inputmode='numeric'><button type='button' class='ttap-btn day' id='ttApD0'>Today</button><button type='button' class='ttap-btn day' id='ttApD1'>Tomorrow</button></div>" +
+    "<div class='ttap-row'><button type='button' class='ttap-btn' id='ttApLgT'>Leagues (<span id='ttApLgC'>0</span>) ▾</button><button type='button' class='ttap-btn' id='ttApAll'>All</button><button type='button' class='ttap-btn' id='ttApNone'>None</button></div>" +
+    "<div id='ttApLgBox' style='display:none'><input id='ttApSearch' placeholder='Search league' style='width:100%'><div id='ttApLeagues'></div></div>" +
+    "<div class='ttap-row'><button type='button' class='ttap-btn go' id='ttApRun'>▶ Start</button><button type='button' class='ttap-btn alt' id='ttApBuild'>🎰 Build parlay</button><button type='button' class='ttap-btn' id='ttApRetry'>🔁 Retry no-line</button></div>" +
+    "<div class='ttap-row'><button type='button' class='ttap-btn' id='ttApCopy'>📋 Copy</button><button type='button' class='ttap-btn warn' id='ttApClear'>Clear</button><button type='button' class='ttap-btn warn' id='ttApWipe'>🗑 Wipe memory</button></div>" +
+    "<div id='ttApMsg' style='font-size:11px;min-height:14px;margin-top:4px'></div></div><div id='ttApParlay'></div><div class='ttap-card'><b>Predicted games</b><div class='ttap-wrap' id='ttApList' style='margin-top:6px'></div></div></div>";
+  document.body.appendChild(m); const err = (e) => setMsg("Error: " + (e && e.message || e));
+  $("ttApX").onclick = () => m.classList.remove("open");
+  $("ttApN").onchange = () => { S.cfg.n = Math.max(2, Math.min(30, Math.round(Number($("ttApN").value) || 8))); save(); render(); };
+  [0, 1].forEach((d) => { $("ttApD" + d).onclick = () => { S.cfg.day = d; save(); render(); }; });
+  $("ttApLgT").onclick = () => { const b = $("ttApLgBox"); b.style.display = b.style.display === "none" ? "block" : "none"; renderLeagues(); };
+  $("ttApSearch").oninput = renderLeagues;
+  $("ttApLeagues").onchange = (e) => { const k = e.target.dataset && e.target.dataset.k; if (!k) return; const a = S.cfg.leagues.filter((x) => x !== k); if (e.target.checked) a.push(k); S.cfg.leagues = a; save(); render(); };
+  $("ttApAll").onclick = () => { S.cfg.leagues = lgList().map((x) => x.l.key); save(); renderLeagues(); render(); };
+  $("ttApNone").onclick = () => { S.cfg.leagues = []; save(); renderLeagues(); render(); };
+  $("ttApRun").onclick = () => { if (S.run) { S.run = false; save(); render(); setMsg("Paused. Progress is saved; press Start to continue."); } else start().catch(err); };
+  $("ttApBuild").onclick = () => build().catch(err);
+  $("ttApRetry").onclick = () => { let n = 0; pool().forEach((r) => { if (r.retry && r.start > Date.now()) { requeue(r); n++; } }); if (n) { S.run = true; save(); render(); pump(); } setMsg(n + " retry-able match(es) re-queued."); };
+  $("ttApCopy").onclick = () => { const P = S.parlay; if (!P || !P.legs.length) { setMsg("Build a parlay first."); return; } const t = P.legs.map((g, i) => (i + 1) + ". " + fmtT(g.start) + " | " + g.league + " | " + g.home + " vs " + g.away + " | " + TT_MARKETS[g.mk].label + " " + g.pick + " @" + Number(g.odds).toFixed(2)).join("\n"); copyText(t).then(() => setMsg("Copied.")).catch(err); };
+  $("ttApClear").onclick = () => { S.run = false; S.queue = []; S.parlay = null; S.cfg = DEF(); save(); renderLeagues(); render(); setMsg("Cleared to defaults. Predicted games are still in memory."); };
+  $("ttApWipe").onclick = () => { if (!confirm("Delete ALL predicted games from Auto Parlay memory? Tracked picks are not touched.")) return; S.cache = {}; S.queue = []; S.parlay = null; S.run = false; save(); render(); setMsg("Memory wiped."); };
+}
+function open() { buildModal(); $("ttApModal").classList.add("open"); renderLeagues(); render(); }
+function init() {
+  load(); buildModal();
+  const head = document.querySelector("#trackerModal .tracker-head-actions");
+  if (head && !$("ttApBtn")) { const b = document.createElement("button"); b.type = "button"; b.id = "ttApBtn"; b.className = "tracker-insights-btn"; b.title = "Auto Parlay"; b.textContent = "🎯"; head.insertBefore(b, $("trackerCloseBtn")); b.onclick = open; }
+  window.addEventListener("pagehide", save);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.run && S.queue.length && !pumping) pump(); });
+  render(); if (S.run && S.queue.length) setTimeout(pump, 1500); /* resume where it stopped */
+}
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
+window.TTAP = { state: () => S, open };
+} catch (e) { try { console.error("Auto Parlay failed to load", e); } catch (_e) {} }
+})();
+</script>
+
 </body>
 </html>
