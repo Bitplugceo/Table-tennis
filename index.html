@@ -1,4 +1,3 @@
-M
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3794,7 +3793,13 @@ function parseLine(id) {
 }
 
 /* ---------------- leagues ---------------- */
-function normLeagueName(n) { return String(n || "").replace(/^Czech Republic - /, "Czechia - ").trim(); }
+function normLeagueName(n) {
+  let s = String(n == null ? "" : n).normalize("NFKC").replace(/\s+/g, " ").trim();
+  s = s.replace(/^czech\s+republic\s*-\s*/i, "Czechia - ");
+  const key = s.toLocaleLowerCase();
+  const canonical = Object.values(TT_LEAGUE_DATA.leagues || {}).find((d) => String(d.league || "").normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase() === key);
+  return canonical ? canonical.league : s;
+}
 function leagueKeyOf(name) { return normLeagueName(name).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, ""); }
 const TT_LEAGUES = {};
 Object.values(TT_LEAGUE_DATA.leagues).forEach((d) => {
@@ -3834,7 +3839,12 @@ const sportyTT = (route, ttl) => fetchJson(TT_WORKER_URL + "/sporty/tt/" + route
 const sportyEventLegacy = (id) => fetchJson(WORKER_BASE_URL + "/sporty/event?id=" + encodeURIComponent(id), "SportyBet(worker)", 20000).then((j) => { if (!j || j.bizCode !== 10000 || !j.data) throw new Error("SportyBet " + (j && (j.error || j.message) || "bad response")); return j.data; });
 
 /* ---------------- match normalisation + validity (walkover / retirement / abandoned filtering) ---------------- */
-function validSet(x, y) { const w = Math.max(x, y), l = Math.min(x, y); return (w === 11 && l <= 9) || (w > 11 && w - l === 2); }
+function validSet(x, y) {
+  x = Number(x); y = Number(y);
+  if (!Number.isInteger(x) || !Number.isInteger(y) || x < 0 || y < 0 || x === y) return false;
+  const w = Math.max(x, y), l = Math.min(x, y);
+  return (w === 11 && l <= 9) || (w >= 12 && l >= 10 && w - l === 2);
+}
 function finishMatch(m) {
   if (!m.sets.length || !m.sets.every((s) => Number.isFinite(s[0]) && Number.isFinite(s[1]) && validSet(s[0], s[1]))) return null;
   const a = m.sets.filter((s) => s[0] > s[1]).length, b = m.sets.length - a, need = Math.max(a, b);
@@ -4292,7 +4302,10 @@ function ttMeanAt(p, bo) { /* mean AND median (fair line) of the mixed distribut
   return { tot: lerp(g.tot), s1: lerp(g.s1), medT: lerp(g.mt), med1: lerp(g.m1) };
 }
 function ttHidden(list, bo, nameA, nameB, nowMs, useH2H) {
-  const same = list.filter((m) => m.bo === bo).slice().sort((x, y) => x.t - y.t);
+  const cutoff = Number.isFinite(Number(nowMs)) && Number(nowMs) > 0 ? Number(nowMs) : Date.now();
+  /* Historical replay must never see matches after the prediction timestamp. Stable tie-breakers make equal-time histories reproducible. */
+  const same = list.filter((m) => m && m.bo === bo && Number.isFinite(Number(m.t)) && Number(m.t) > 0 && Number(m.t) <= cutoff)
+    .slice().sort((x, y) => Number(x.t) - Number(y.t) || String(x.id || "").localeCompare(String(y.id || "")) || normName(x.h).localeCompare(normName(y.h)) || normName(x.a).localeCompare(normName(y.a)));
   const R = new Map(), cnt = new Map(), setOneHist = new Map(), h2 = new Map(), pairDay = new Map(); const res = []; const L1 = [];
   const day = (t) => Math.floor((t + 3600000) / 86400000);
   const rat = (P, t) => { const r = R.get(P); if (!r) return [0, 0]; const f = Math.pow(0.5, (t - r.t) / 86400000 / TTH.HL); return [r.r * f, r.n * f]; };
@@ -4480,6 +4493,19 @@ function renderRows(table, rows, lg, nameA, nameB, L) {
 /* ---------------- tracker ---------------- */
 let g_tracker = { picks: [] };
 function trackerLoad() { try { setTimeout(() => { const st = g_tracker.picks.reduce((o, p) => { o[p.resultStatus] = (o[p.resultStatus] || 0) + 1; return o; }, {}); engineDebug("hydrate state snapshot", { local: { totalCount: g_tracker.picks.length, pending: st.pending || 0, wins: st.win || 0, losses: st.loss || 0, pushes: st.push || 0 } }); }, 0); const j = JSON.parse(localStorage.getItem(TRACKER_KEY) || "null"); g_tracker = j && Array.isArray(j.picks) ? j : { picks: [] }; } catch (_e) { g_tracker = { picks: [] }; } }
+const TT_TRACKER_ARCHIVE_AGE_MS = 10 * 60 * 60 * 1000;
+function ttEventTimeMs(value) { const n = Number(value); if (Number.isFinite(n) && n > 0) return n < 1e12 ? n * 1000 : n; const parsed = Date.parse(String(value || "")); return Number.isFinite(parsed) ? parsed : NaNv; }
+function archiveOldTrackedPicks(nowMs) {
+  const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now(); let changed = false;
+  (g_tracker.picks || []).forEach((p) => {
+    if (!p || p.archived) return;
+    const eventMs = ttEventTimeMs(p.eventDate || p.startTime || p.createdAt);
+    if (isFiniteVal(eventMs) && now - eventMs >= TT_TRACKER_ARCHIVE_AGE_MS) {
+      p.archived = true; p.archivedAt = now; p.archiveReason = "event-start-older-than-10-hours"; changed = true;
+    }
+  });
+  return changed;
+}
 function trackerSave() { trackerDebug("tracker save", { picks: g_tracker.picks.length, testMode: !!TT_TEST_MODE }); if (TT_TEST_MODE) return; try { localStorage.setItem(TRACKER_KEY, JSON.stringify(g_tracker)); window.__ttSaveFailures = 0; } catch (e) { window.__ttSaveFailures = (window.__ttSaveFailures || 0) + 1; addIssue("Tracker save failed: " + e.message); } }
 function watDayKey(ms) { return Math.floor((ms + 3600000) / 86400000); }
 function trackerCorrelationBlock(lg, A, B) {
@@ -4524,13 +4550,26 @@ function settlePick(p, total, set1, r) {
   const actual = p.marketKey === "ft" ? total : set1; if (!isFiniteVal(actual)) return false; const ln = Number(p.line); if (!isFiniteVal(ln)) return false;
   p.actual = actual; p.resultStatus = actual === ln ? "push" : (actual > ln) === (p.side === "OVER") ? "win" : "loss"; p.settledAt = Date.now(); return true;
 }
+function ttResultStatusForActual(p, actual) {
+  const value = Number(actual), line = Number(p && p.line), side = String(p && p.side || "").toUpperCase();
+  if (!Number.isInteger(value) || !Number.isFinite(line) || !["OVER", "UNDER"].includes(side)) return null;
+  return value === line ? "push" : ((value > line) === (side === "OVER") ? "win" : "loss");
+}
 async function autoSettle(force) {
   const pend = g_tracker.picks.filter((p) => p.resultStatus === "pending" && (force ? Date.now() > p.eventDate + 5 * 60000 : Date.now() > p.eventDate + 20 * 60000)); if (!pend.length) return;
   let changed = false;
   try { /* settled server-side by the worker cron (only for picks synced to it) */
     const key = localStorage.getItem("TT_SYNC_KEY") || ""; const r = await fetch(TT_WORKER_URL + "/tt/picks?since=" + (Date.now() - 30 * 86400000), { headers: key ? { "X-TT-Key": key } : {} }); const j = await r.json();
     const m = new Map(((j && j.rows) || []).map((x) => [x.sig, x]));
-    pend.forEach((p) => { const x = m.get(p.signature); if (x && x.status && x.status !== "pending" && (x.status === "void" || (isFiniteVal(x.actual) && x.actual >= (p.marketKey === "ft" ? 33 : 11)))) { p.resultStatus = x.status; p.actual = isFiniteVal(x.actual) ? x.actual : NaNv; p.settledAt = Date.now(); p.settledBy = "worker"; changed = true; } });
+    pend.forEach((p) => {
+      const x = m.get(p.signature), st = String(x && x.status || "").toLowerCase(); if (!x || !st || st === "pending") return;
+      if (st === "void") { p.resultStatus = "void"; p.actual = NaNv; p.settledAt = Date.now(); p.settledBy = "worker"; changed = true; return; }
+      const actual = Number(x.actual), minPts = p.marketKey === "ft" ? (((Number(p.bo) || 5) + 1) / 2) * 11 : 11;
+      const expected = ttResultStatusForActual(p, actual);
+      if (["win", "loss", "push"].includes(st) && Number.isInteger(actual) && actual >= minPts && expected === st) {
+        p.resultStatus = expected; p.actual = actual; p.settledAt = Date.now(); p.settledBy = "worker-validated"; changed = true;
+      } else engineDebug("worker settlement rejected: invalid score/status/line combination", { signature: p.signature, workerStatus: st, actual: x.actual, expectedStatus: expected });
+    });
   } catch (e) { reportSoftFailure("worker-settle", e); }
   for (const p of pend.filter((x) => x.resultStatus === "pending" && Date.now() < x.eventDate + 72 * 3600000)) { /* LOCK-54: stop auto-retrying after 72 h; settle by hand */
     try {
@@ -4566,7 +4605,9 @@ function ttParseLive(e) {
   const st = String(e.matchStatus || ""); const m = st.match(/^set (\d+)$/i), br = st.match(/^(\d+)(?:st|nd|rd|th)? break$/i); const set = m ? Number(m[1]) : br ? Number(br[1]) : Number(e.period) || 0;
   const gs = (e.gameScore || []).map((x) => String(x).split(":").map(Number)).filter((x) => x.length === 2 && x.every(Number.isFinite));
   const ss = String(e.setScore || "").split(":").map(Number);
-  const games = gs.slice(0, Math.max(0, br ? set : set - 1)).filter((x) => validSet(x[0], x[1])); /* finished sets only (validated) */
+  const games = []; const completedCount = Math.min(gs.length, Math.max(0, br ? set : set - 1));
+  /* Preserve sequence: stop at the first missing/invalid set so a later set can never be mistaken for Game 1. */
+  for (let i = 0; i < completedCount; i++) { if (!validSet(gs[i][0], gs[i][1])) break; games.push(gs[i]); }
   const cur = !br && set > 0 && gs[set - 1] ? gs[set - 1] : null;
   return { set, brk: !!br, sets: ss.length === 2 && ss.every(Number.isFinite) ? ss : null, games, cur, statusName: st, capturedAt: Date.now() };
 }
@@ -4618,10 +4659,20 @@ function raidLog(event, data) {
   try { if (typeof AFDB !== "undefined" && typeof AFDB.log === "function") AFDB.log(level, "RAID", event, payload); } catch (_e) {}
   return payload;
 }
-function ttReconcileBuckets() { const seen = new Map(); g_tracker.picks.forEach((p) => { const k = p.signature; const o = seen.get(k); if (!o || (o.resultStatus === "pending" && p.resultStatus !== "pending")) seen.set(k, p); }); const before = g_tracker.picks.length; g_tracker.picks = g_tracker.picks.filter((p) => seen.get(p.signature) === p); return before - g_tracker.picks.length; }
+function ttReconcileBuckets() {
+  const seen = new Map(), keep = new Set();
+  g_tracker.picks.forEach((p) => {
+    const sig = String(p && p.signature || "").trim();
+    if (!sig) { keep.add(p); return; } /* Missing signatures are not a shared identity; never collapse unrelated records. */
+    const old = seen.get(sig);
+    if (!old || (String(old.resultStatus || "pending").toLowerCase() === "pending" && String(p.resultStatus || "pending").toLowerCase() !== "pending")) seen.set(sig, p);
+  });
+  seen.forEach((p) => keep.add(p));
+  const before = g_tracker.picks.length; g_tracker.picks = g_tracker.picks.filter((p) => keep.has(p)); return before - g_tracker.picks.length;
+}
 function ttPurgeZombieKeys() { /* only old TT tracker keys whose picks are ALL already in the canonical tracker; nothing unique is ever deleted */
   if (TT_TEST_MODE) return 0; let purged = 0; const have = new Set(g_tracker.picks.map((p) => p.signature));
-  for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (!k || k === TRACKER_KEY || !/^TT_TRACKER_V\d+$/.test(k)) continue; try { const j = JSON.parse(localStorage.getItem(k) || "null"); const ps = (j && j.picks) || []; if (ps.every((p) => have.has(p.signature))) { localStorage.removeItem(k); purged++; } } catch (_e) {} }
+  for (let i = localStorage.length - 1; i >= 0; i--) { const k = localStorage.key(i); if (!k || k === TRACKER_KEY || !/^TT_TRACKER_V\d+$/.test(k)) continue; try { const j = JSON.parse(localStorage.getItem(k) || "null"); const ps = (j && j.picks) || []; if (ps.every((p) => String(p && p.signature || "").trim() && have.has(p.signature))) { localStorage.removeItem(k); purged++; } } catch (_e) {} }
   return purged;
 }
 async function triggerTrackerMilitaryRaid() {
@@ -4632,7 +4683,8 @@ async function triggerTrackerMilitaryRaid() {
   try {
     setStatus("RAID IN PROGRESS ⚡️", "#ffcf73"); raidLog("raid_start", {});
     const countPending = () => g_tracker.picks.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "pending").length;
-    const before = { active: g_tracker.picks.length, archived: 0, pending: countPending() };
+    archiveOldTrackedPicks(Date.now());
+    const before = { active: g_tracker.picks.filter((p) => !p.archived).length, archived: g_tracker.picks.filter((p) => !!p.archived).length, pending: countPending() };
     const report = { missingDependencies: [], zombieKeysPurged: 0, bucketsReconciled: false, settledThisPass: 0, archivedThisPass: 0, liveGamesSynced: 0, desyncsRepaired: [], errors: [] };
     const runStage = async (label, fn, ms) => { try { await withRaidTimeout(fn(), ms || MILITARY_RAID_STAGE_TIMEOUT_MS, label); } catch (err) { const m = err && err.message || String(err); report.errors.push({ stage: label, error: m }); raidLog("stage_failed", { stage: label, error: m }); } };
     await runStage("reconcile buckets", () => { ttReconcileBuckets(); report.bucketsReconciled = true; });
@@ -4640,14 +4692,20 @@ async function triggerTrackerMilitaryRaid() {
       runStage("purge zombie storage", async () => { report.zombieKeysPurged = ttPurgeZombieKeys(); }),
       runStage("force-settle + live sync", async () => { const pb = countPending(); await pullWorkerPicks(); await Promise.all([autoSettle(true), pollLiveGameClocks()]); report.settledThisPass = Math.max(0, pb - countPending()); report.liveGamesSynced = g_liveGameStatus.size; }, 60000),
     ]);
-    await runStage("archive sweep", () => { report.archivedThisPass = 0; }); /* TT keeps one bucket: nothing to archive */
+    await runStage("archive sweep", () => {
+      const beforeArchived = g_tracker.picks.filter((p) => !!p.archived).length;
+      const changed = archiveOldTrackedPicks(Date.now());
+      const afterArchived = g_tracker.picks.filter((p) => !!p.archived).length;
+      report.archivedThisPass = Math.max(0, afterArchived - beforeArchived);
+      if (changed) trackerSave();
+    });
     await runStage("force save (local + server)", async () => { trackerSave(); syncPicksToWorker(); }, 120000);
     await runStage("re-hydrate from server", async () => { if (!TT_TEST_MODE) { const keep = g_tracker; trackerLoad(); if (!g_tracker.picks.length && keep.picks.length) g_tracker = keep; } });
-    await runStage("count consistency check", () => { const r = _rec(g_tracker.picks); const sumEl = document.getElementById("trackerSummaryCounts"); const shown = sumEl ? (sumEl.textContent.match(/(\d+) wins/) || [])[1] : null; if (shown != null && Number(shown) !== r.wins) report.desyncsRepaired.push({ before: { wins: Number(shown) }, after: { wins: r.wins } }); });
+    await runStage("count consistency check", () => { const active = g_tracker.picks.filter((p) => !p.archived), r = _rec(active); const sumEl = document.getElementById("trackerSummaryCounts"); const shown = sumEl ? (sumEl.textContent.match(/(\d+) wins/) || [])[1] : null; if (shown != null && Number(shown) !== r.wins) report.desyncsRepaired.push({ before: { wins: Number(shown) }, after: { wins: r.wins } }); });
     await runStage("re-render", () => { renderTracker(); });
     await runStage("diagnostic sweep", async () => {});
-    const after = { active: g_tracker.picks.length, archived: 0, pending: countPending() };
-    const summaryMsg = `Military Raid complete — ${report.zombieKeysPurged} zombie key(s) purged, ${report.settledThisPass} pick(s) force-settled, ${report.archivedThisPass} archived, ${report.liveGamesSynced} live game(s) synced` + (report.desyncsRepaired.length ? `, ${report.desyncsRepaired.length} count desync(s) repaired` : "") + (report.errors.length ? `, ${report.errors.length} stage(s) hit errors (see data)` : "") + ".";
+    const after = { active: g_tracker.picks.filter((p) => !p.archived).length, archived: g_tracker.picks.filter((p) => !!p.archived).length, pending: countPending() };
+    const summaryMsg = `Military Raid complete — ${report.zombieKeysPurged} zombie key(s) purged, ${report.settledThisPass} pick(s) force-settled, ${report.archivedThisPass} newly archived (${after.archived} total archived, ${after.active} active), ${report.liveGamesSynced} live game(s) synced` + (report.desyncsRepaired.length ? `, ${report.desyncsRepaired.length} count desync(s) repaired` : "") + (report.errors.length ? `, ${report.errors.length} stage(s) hit errors (see data)` : "") + ".";
     raidLog("raid_complete", Object.assign({ summary: summaryMsg, before, after }, report));
     setStatus(report.errors.length ? "RAID DONE (warnings) ⚡️" : "RAID COMPLETE ⚡️", report.errors.length ? "#ffcf73" : "#4ade80");
     setTimeout(() => setStatus("", ""), 2400);
@@ -4800,12 +4858,15 @@ function reportHtml() {
     const st = p.resultStatus, c = st === "win" ? "color: #3a9c35;" : st === "loss" ? "color: #c91920;" : "color: #888;";
     return `<tr><td><strong>${escapeHtml(p.homeTeam + " vs " + p.awayTeam)}</strong><br><span style="color: var(--muted); font-size: 9px;">${escapeHtml(p.market)} (Line: ${escapeHtml(String(p.line))})</span></td><td style="font-weight:bold; white-space: nowrap;">${escapeHtml(p.pick)}</td><td style="font-weight:900; text-transform:uppercase; ${c}">${escapeHtml(st)}${isFiniteVal(p.actual) ? `<br><span style="font-size:9px; color:var(--muted);">Score: ${p.actual}</span>` : ""}</td><td style="font-size: 9px; color: var(--muted); line-height: 1.4;"><strong>Edge:</strong> <span style="color:var(--text)">${isFiniteVal(p.edge) ? (p.edge > 0 ? "+" : "") + p.edge.toFixed(1) + " pts" : "NaN"}</span> | <strong>Grade:</strong> <span style="color:var(--text)">${escapeHtml(p.grade)}</span><br><strong>Proj:</strong> ${isFiniteVal(p.proj) ? p.proj : "NaN"} · bo${escapeHtml(String(p.bo || "NaN"))}<br><strong>Settled:</strong> ${p.settledAt ? escapeHtml(fmtDT(p.settledAt)) : "NaN"}${p.settledBy ? " (" + escapeHtml(p.settledBy) + ")" : p.manual ? " (manual)" : ""}</td></tr>`;
   }).join("");
-  const archiveRows = all.slice().sort((a, b) => (Number(b.eventDate) || 0) - (Number(a.eventDate) || 0)).map((p) => {
+  const archivedCount = all.filter((p) => !!p.archived || (isFiniteVal(ttEventTimeMs(p.eventDate)) && Date.now() - ttEventTimeMs(p.eventDate) >= TT_TRACKER_ARCHIVE_AGE_MS)).length;
+  const activeCount = all.length - archivedCount;
+  const archiveRows = all.slice().sort((a, b) => (ttEventTimeMs(b.eventDate) || 0) - (ttEventTimeMs(a.eventDate) || 0)).map((p) => {
     const st = String(p.resultStatus || "pending").toLowerCase();
-    const dt = Number(p.eventDate); const date = Number.isFinite(dt) && dt > 0 ? fmtDT(dt) : "NaN";
-    return `<tr><td>${escapeHtml(date)}</td><td>${escapeHtml(p.league || "NaN")}</td><td><strong>${escapeHtml((p.homeTeam || "Player A") + " vs " + (p.awayTeam || "Player B"))}</strong></td><td>${escapeHtml(p.market || "NaN")}</td><td>${escapeHtml(String(p.line ?? "NaN"))}</td><td>${escapeHtml(p.pick || "NaN")}</td><td>${escapeHtml(String(p.grade || "NaN"))}</td><td>${isFiniteVal(p.proj) ? escapeHtml(String(p.proj)) : "NaN"}</td><td>${isFiniteVal(p.edge) ? escapeHtml(String(p.edge)) : "NaN"}</td><td>${escapeHtml(st.toUpperCase())}${isFiniteVal(p.actual) ? " · " + escapeHtml(String(p.actual)) : ""}</td></tr>`;
+    const dt = ttEventTimeMs(p.eventDate); const date = Number.isFinite(dt) && dt > 0 ? fmtDT(dt) : "NaN";
+    const archived = !!p.archived || (isFiniteVal(dt) && Date.now() - dt >= TT_TRACKER_ARCHIVE_AGE_MS);
+    return `<tr><td>${escapeHtml(date)}</td><td style="font-weight:800;">${archived ? "ARCHIVED" : "ACTIVE"}</td><td>${escapeHtml(p.league || "NaN")}</td><td><strong>${escapeHtml((p.homeTeam || "Player A") + " vs " + (p.awayTeam || "Player B"))}</strong></td><td>${escapeHtml(p.market || "NaN")}</td><td>${escapeHtml(String(p.line ?? "NaN"))}</td><td>${escapeHtml(p.pick || "NaN")}</td><td>${escapeHtml(String(p.grade || "NaN"))}</td><td>${isFiniteVal(p.proj) ? escapeHtml(String(p.proj)) : "NaN"}</td><td>${isFiniteVal(p.edge) ? escapeHtml(String(p.edge)) : "NaN"}</td><td>${escapeHtml(st.toUpperCase())}${isFiniteVal(p.actual) ? " · " + escapeHtml(String(p.actual)) : ""}</td></tr>`;
   }).join("");
-  const archive = _card("Complete tracked-picks archive", `${all.length} total picks · all statuses · all model versions`, `<div class="tracker-report-subtitle">This table uses the same canonical tracker records as the Tracked Picks page. No 40-row or 200-row preview limit.</div>${_table("<th>Date</th><th>League</th><th>Match</th><th>Market</th><th>Line</th><th>Pick</th><th>Grade</th><th>Projection</th><th>Edge</th><th>Result / Actual</th>", archiveRows, "No tracked picks saved yet.", 10)}`);
+  const archive = _card("Complete tracked-picks archive", `${all.length} total picks · ${activeCount} active · ${archivedCount} archived · all statuses and model versions`, `<div class="tracker-report-subtitle">Picks leave the Tracked Picks table 10 hours after scheduled start and remain here in the complete archive. Records are retained and included in exports.</div>${_table("<th>Date</th><th>Archive status</th><th>League</th><th>Match</th><th>Market</th><th>Line</th><th>Pick</th><th>Grade</th><th>Projection</th><th>Edge</th><th>Result / Actual</th>", archiveRows, "No tracked picks saved yet.", 11)}`);
   const body = `
       <div class="tracker-kpi-grid">
         <div class="tracker-kpi-card featured"><div class="tracker-kpi-label">Overall tracked results (all sources and grades)</div><div class="tracker-kpi-value">${at.wins}W</div><div class="tracker-kpi-sub">Losses ${at.losses} • Pushes ${at.pushes} • Win rate ${formatPctTT(at.winPct)} • ${at.settled} settled picks</div></div>
@@ -4857,9 +4918,11 @@ function configPageHtml() { return `<div class="tracker-analytics-shell"><div cl
 function renderTracker() {
   const body = document.getElementById("trackedPicksBody"), empty = document.getElementById("trackerEmpty"), panel = document.getElementById("trackerAnalyticsPanel"), sumEl = document.getElementById("trackerSummary");
   if (!body) return;
-  const all = g_tracker.picks, r = _rec(all), pend = all.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "pending"), live = pend.filter((p) => g_liveGameStatus.has(String(p.eventId))).length;
-  const leanAll = all.filter((p) => p.lean), leanW = leanAll.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "win").length, leanL = leanAll.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "loss").length, voids = all.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "void").length;
-  sumEl.innerHTML = `<span id="trackerSummaryCounts">${all.length} picks • ${live} live • ${pend.length - live} pending • ${r.wins} wins • ${r.losses} losses${r.pushes ? " • " + r.pushes + " pushes" : ""}${voids ? " • " + voids + " void" : ""}${leanAll.length ? " • lean " + leanW + "W-" + leanL + "L of " + leanAll.length : ""}</span>`;
+  const archiveChanged = archiveOldTrackedPicks(Date.now()); if (archiveChanged) trackerSave();
+  const all = g_tracker.picks, activePicks = all.filter((p) => !p.archived), archivedCount = all.length - activePicks.length;
+  const r = _rec(activePicks), pend = activePicks.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "pending"), live = pend.filter((p) => g_liveGameStatus.has(String(p.eventId))).length;
+  const leanAll = activePicks.filter((p) => p.lean), leanW = leanAll.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "win").length, leanL = leanAll.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "loss").length, voids = activePicks.filter((p) => String(p.resultStatus || "pending").toLowerCase() === "void").length;
+  sumEl.innerHTML = `<span id="trackerSummaryCounts">${activePicks.length} active picks • ${archivedCount} archived • ${live} live • ${pend.length - live} pending • ${r.wins} wins • ${r.losses} losses${r.pushes ? " • " + r.pushes + " pushes" : ""}${voids ? " • " + voids + " void" : ""}${leanAll.length ? " • lean " + leanW + "W-" + leanL + "L of " + leanAll.length : ""}</span>`;
   const fill = document.getElementById("enginePerfFill"), pctEl = document.getElementById("enginePerfPct"); if (fill) fill.style.width = (isFinite(r.winPct) ? Math.round(r.winPct) : 0) + "%"; if (pctEl) pctEl.textContent = isFinite(r.winPct) ? Math.round(r.winPct) + "%" : "NaN";
   syncTrackerModalView(); updateTrackerInsightsButton();
   if (!isTrackerPicksView()) {
@@ -4868,8 +4931,8 @@ function renderTracker() {
     return;
   }
   panel.classList.add("tracker-hidden"); panel.style.display = "none"; panel.innerHTML = "";
-  empty.style.display = all.length ? "none" : "block"; empty.textContent = "No tracked picks saved yet.";
-  body.innerHTML = all.map((p, i) => {
+  empty.style.display = activePicks.length ? "none" : "block"; empty.textContent = archivedCount ? `No active picks. ${archivedCount} older-than-10-hour games are in Engine Report → Complete tracked-picks archive.` : "No tracked picks saved yet.";
+  body.innerHTML = activePicks.map((p) => { const i = all.indexOf(p);
     const st = String(p.resultStatus || "pending").toLowerCase(); const isLive = st === "pending" && g_liveGameStatus.has(String(p.eventId));
     const cls = st === "win" ? "track-win" : st === "loss" ? "track-loss" : st === "push" || st === "void" ? "track-push" : isLive ? "pred-noplay" : "track-pending";
     let sh;
@@ -4914,10 +4977,12 @@ function openManualSettle(p) {
   };
 }
 function trackerText() {
+  if (archiveOldTrackedPicks(Date.now())) trackerSave();
   const picks = g_tracker && Array.isArray(g_tracker.picks) ? g_tracker.picks : [];
   const sorted = picks.slice().sort((a, b) => (Number(a.eventDate) || 0) - (Number(b.eventDate) || 0));
   const counts = sorted.reduce((o, p) => { const k = String(p.resultStatus || "pending").toLowerCase(); o[k] = (o[k] || 0) + 1; return o; }, {});
-  const lines = ["TABLE TENNIS ENGINE — COMPLETE TRACKED PICKS EXPORT", "Exported at: " + new Date().toISOString(), "Engine build: " + TT_BUILD, "Total picks: " + sorted.length, "Status counts: " + Object.keys(counts).sort().map(k => k + "=" + counts[k]).join(", "), "", "Each pick is a JSON object so no fields are lost during export.", ""];
+  const archived = sorted.filter((p) => !!p.archived || (isFiniteVal(ttEventTimeMs(p.eventDate)) && Date.now() - ttEventTimeMs(p.eventDate) >= TT_TRACKER_ARCHIVE_AGE_MS)).length;
+  const lines = ["TABLE TENNIS ENGINE — COMPLETE TRACKED PICKS EXPORT", "Exported at: " + new Date().toISOString(), "Engine build: " + TT_BUILD, "Total picks: " + sorted.length, "Active (<10 hours after start): " + (sorted.length - archived), "Archived (>=10 hours after start): " + archived, "Status counts: " + Object.keys(counts).sort().map(k => k + "=" + counts[k]).join(", "), "", "Each pick is a JSON object so no fields are lost during export. Archived records are retained in this full export.", ""];
   sorted.forEach((p, i) => { lines.push("===== PICK " + (i + 1) + " / " + sorted.length + " ====="); try { lines.push(JSON.stringify(p, (k, v) => typeof v === "number" && !Number.isFinite(v) ? String(v) : v, 2)); } catch (_e) { lines.push(String(p)); } lines.push(""); });
   return lines.join("\n");
 }
@@ -4978,6 +5043,7 @@ function boot() {
   document.getElementById("inputsCopyBtn").addEventListener("click", () => { const o = {}; document.querySelectorAll(".wrapper input").forEach((el) => { if (el.id) o[el.id] = el.type === "checkbox" ? el.checked : el.value; }); o.league = ls.value; o.bestOf = AppState.bo; copyText(JSON.stringify(o)); });
   ttFreshCapture();
   trackerLoad();
+  setInterval(() => { if (archiveOldTrackedPicks(Date.now())) { trackerSave(); renderTracker(); } }, 60000); /* archive games promptly when they pass the 10-hour age cutoff */
   setTimeout(() => { autoSettle(true).catch((e) => reportSoftFailure("startup-settle", e)); }, 4000); /* settle the backlog of picks that the old set-1>=20 guard left pending */
   try { const mm = /to (\d{4}-\d{2}-\d{2})/.exec(TT_LEAGUE_DATA.window || ""); if (mm) { const ageD = (Date.now() - Date.parse(mm[1] + "T00:00:00Z")) / 86400000; if (ageD > TT_CONFIG.staleDataDays) addIssue("Embedded league averages are " + Math.round(ageD) + " days old (window ends " + mm[1] + ") — regenerate TT_LEAGUE_DATA."); } } catch (_e) {}
   const modal = document.getElementById("trackerModal");
