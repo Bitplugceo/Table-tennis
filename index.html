@@ -1,3 +1,4 @@
+A
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3753,7 +3754,7 @@ body.dark-mode .tracker-analytics-section-head {
    probability + odds/EV gates; median-consistent calibration; deterministic history load; stats/best-of/H2H coherence;
    Unicode-safe name matching; strict series parsing; sample SD; WAT day bounds; tracker stale-pick handling; honest report stats. */
 function isFiniteVal(v) { if (typeof v === "number") return Number.isFinite(v); if (typeof v === "string") return v.trim() !== "" && Number.isFinite(Number(v)); return false; }
-const TT_BUILD = "tt-engine-v1.4-20261113-sportybet-id-marketfix";
+const TT_BUILD = "tt-engine-v1.5-20261113-live-event-id-settlement-fix";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
 const WORKER_BASE_URL = WORKER_URL.replace(/\/+$/, "");
 const SR_GISMO = "https://stats.fn.sportradar.com/sportradar/en/Etc:UTC/gismo/";
@@ -3865,19 +3866,25 @@ const TT_WORKER_URL = "https://tt-engine.ridwantunde636.workers.dev";
 const sportyTT = (route, ttl, timeoutMs) => fetchJson(TT_WORKER_URL + "/sporty/tt/" + route, "SportyBet(TT worker)", ttl, timeoutMs).then((j) => { if (!j || j.bizCode !== 10000) throw new Error("SportyBet " + (j && (j.error || j.message) || "bad response")); return j.data; });
 /* SportyBet's displayed numeric match ID is not necessarily the canonical eventId used in a market selection.
    Keep the numeric lookup ID (Worker route) separate from the canonical event reference (market outcomes). */
-function ttAddSportyId(out, value, allowSrSuffix) {
+function ttAddSportyId(out, value) {
   if (value == null) return;
   const s = String(value).trim();
-  if (/^\d{2,}$/.test(s)) { if (!out.includes(s)) out.push(s); return; }
-  if (allowSrSuffix) { const m = /^sr:match:(\d+)$/i.exec(s); if (m && !out.includes(m[1])) out.push(m[1]); }
+  /* A Sportradar sr:match:<n> reference is not a verified SportyBet numeric lookup ID.
+     Never strip its prefix and guess that the suffix belongs to SportyBet. */
+  if (/^\d{2,}$/.test(s) && !out.includes(s)) out.push(s);
 }
 function ttSportyIdCandidates(obj) {
   if (!obj || typeof obj !== "object") return [];
   const out = [];
-  ["sportyBetEventId", "sportybetEventId", "sportsbookEventId", "bookmakerEventId", "sbEventId", "sportyId"].forEach((k) => ttAddSportyId(out, obj[k], true));
-  /* Prefer a numeric sportsbook id field over the suffix of a provider-style eventId. */
-  ["id", "eventId", "event_id", "matchId", "match_id", "gameId", "game_id"].forEach((k) => ttAddSportyId(out, obj[k], false));
-  ["eventId", "event_id", "matchId", "match_id", "gameId", "game_id"].forEach((k) => ttAddSportyId(out, obj[k], true));
+  /* Explicit sportsbook aliases first. Generic IDs are only fallbacks: they may be provider IDs, not SportyBet lookup IDs. */
+  ["sportyBetEventId", "sportybetEventId", "sportyBetEventID", "sportybetEventID", "sportyEventId", "sporty_event_id", "sporty_bet_event_id", "sportyBetId", "sportybetId", "sporty_bet_id", "sportyBetMatchId", "sportybetMatchId", "sporty_bet_match_id", "sportybet_match_id", "sportyBetMatchID", "sportyBetFixtureId", "sportybetFixtureId", "sportsbookEventId", "sportsbook_event_id", "sportsbookMatchId", "sportsbookId", "sportsbook_id", "sportsbookFixtureId", "bookEventId", "book_event_id", "betEventId", "bet_event_id", "bookmakerEventId", "bookmaker_event_id", "sbEventId", "sb_event_id", "sbMatchId", "sportyId"].forEach((k) => ttAddSportyId(out, obj[k], true));
+  ["id", "eventId", "event_id", "eventID", "matchId", "match_id", "matchID", "gameId", "game_id"].forEach((k) => ttAddSportyId(out, obj[k], false));
+  ["eventId", "event_id", "eventID", "matchId", "match_id", "matchID", "gameId", "game_id"].forEach((k) => ttAddSportyId(out, obj[k], true));
+  /* Some list responses nest the sportsbook identity under event/source/bookmaker. Do not recursively treat arbitrary `id` fields as sportsbook IDs. */
+  [obj.event, obj.source, obj.bookmaker, obj.sportyBet, obj.sportybet, obj.sportsbook].forEach((nested) => {
+    if (!nested || typeof nested !== "object") return;
+    ["sportyBetEventId", "sportybetEventId", "sportyBetId", "sportybetId", "sportyBetMatchId", "sportybetMatchId", "sporty_bet_match_id", "sportsbookEventId", "sportsbookId", "bookEventId", "eventId", "event_id", "matchId", "match_id", "id"].forEach((k) => ttAddSportyId(out, nested[k], true));
+  });
   return out;
 }
 function ttSportyBookEventRef(ev, fallback) {
@@ -3893,17 +3900,63 @@ function ttTimestampMs(v) {
   if (Number.isFinite(n) && n > 0) return n < 1e12 ? n * 1000 : n;
   const d = Date.parse(String(v)); return Number.isFinite(d) ? d : NaNv;
 }
-function ttSportyPrematchStatus(ev, fixtureStart) {
+function ttSportyStatusText(ev) { return String(ev && (ev.matchStatus || ev.statusName || ev.statusText) || "").trim(); }
+function ttSportyIsLive(ev) {
   const status = ev && ev.status;
-  if (status != null && String(status).trim() !== "" && Number.isFinite(Number(status)) && Number(status) !== 0)
-    return { ok: false, started: Number(status) === 1, reason: Number(status) === 1 ? "SportyBet confirms this match is live/in-play; prematch prices are locked." : "SportyBet event status is " + String(status) + "; only prematch status 0 is accepted." };
-  const statusText = String(ev && (ev.matchStatus || ev.statusName || ev.statusText) || "").trim();
-  if (statusText && !/not[ _-]?started|scheduled|upcoming|prematch/i.test(statusText) && /live|in[ _-]?play|break|set\s*\d|ended|finished|closed|cancel|abandon|walkover|retired|suspend/i.test(statusText))
-    return { ok: false, started: /live|in[ _-]?play|break|set\s*\d|ended|finished/i.test(statusText), reason: "SportyBet event status is " + statusText + "; prematch prices are not accepted." };
+  const text = ttSportyStatusText(ev);
+  return (status != null && String(status).trim() !== "" && Number(status) === 1) || /\blive\b|in[ _-]?play|break|set\s*\d|\d+(?:st|nd|rd|th)?\s+break/i.test(text);
+}
+function ttSportyIsClosed(ev) {
+  return /ended|finished|closed|cancel|abandon|walkover|retired|suspend|postponed/i.test(ttSportyStatusText(ev));
+}
+function ttSportyEventState(ev, fixtureStart, requestedLive) {
+  const status = ev && ev.status;
+  const hasNumericStatus = status != null && String(status).trim() !== "" && Number.isFinite(Number(status));
+  const statusText = ttSportyStatusText(ev);
+  if (ttSportyIsClosed(ev)) return { ok: false, live: false, started: true, reason: "SportyBet event status is " + statusText + "; market is closed or suspended." };
+  if (hasNumericStatus && Number(status) === 1) return { ok: true, live: true, started: true, reason: "" };
+  if (/\blive\b|in[ _-]?play|break|set\s*\d|\d+(?:st|nd|rd|th)?\s+break/i.test(statusText)) return { ok: true, live: true, started: true, reason: "" };
+  if (hasNumericStatus && Number(status) !== 0) return { ok: false, live: false, started: false, reason: "SportyBet event status is " + String(status) + "; this status is not an open match." };
   const evStart = ttTimestampMs(ev && (ev.estimateStartTime != null ? ev.estimateStartTime : ev.startTime != null ? ev.startTime : ev.scheduledStartTime));
   const start = Number.isFinite(evStart) ? evStart : ttTimestampMs(fixtureStart);
-  if (Number.isFinite(start) && start <= Date.now()) return { ok: false, started: true, reason: "SportyBet event has reached its scheduled start; prematch prices are locked." };
-  return { ok: true, started: false, reason: "" };
+  if (Number.isFinite(start) && start <= Date.now()) {
+    /* Only accept a status-less result from the explicit in-play lookup. An explicit status=0 remains scheduled/not-started. */
+    if (requestedLive && !hasNumericStatus && !statusText) return { ok: true, live: true, started: true, reason: "" };
+    return { ok: false, live: false, started: true, reason: "SportyBet event has reached its scheduled start; refresh the live event before reading prices." };
+  }
+  if (requestedLive) return { ok: false, live: false, started: false, reason: "SportyBet live lookup did not return an event confirmed as in-play." };
+  return { ok: true, live: false, started: false, reason: "" };
+}
+function ttCanonicalPickEventId(f) {
+  const values = f ? [f.sourceEventId, f.bookEventId, f.eventId] : [];
+  const normalized = values.map((v) => String(v == null ? "" : v).trim()).filter(Boolean);
+  const canonical = normalized.find((v) => /^sr:match:\d+$/i.test(v));
+  /* When no canonical provider ref exists, keep the fixture's actual event/lookup ID, not an arbitrary source ID. */
+  return canonical || String(f && (f.eventId || f.bookEventId || f.sourceEventId) || "").trim();
+}
+function ttMigrateTrackedEventRef(f) {
+  const canonical = ttCanonicalPickEventId(f), lookup = String(f && f.eventId || "");
+  const league = curLeague();
+  if (!canonical || !/^sr:match:\d+$/i.test(canonical) || !lookup || canonical === lookup || !league || !Array.isArray(g_tracker && g_tracker.picks)) return 0;
+  const pair = [normName(f.home), normName(f.away)].sort().join("|");
+  const fixtureTime = ttTimestampMs(f.start);
+  if (!Number.isFinite(fixtureTime)) return 0;
+  const fixtureDay = watDayKey(fixtureTime);
+  let changed = 0;
+  g_tracker.picks.forEach((p) => {
+    if (!p || String(p.eventId || "") !== lookup || (p.leagueKey || leagueKeyOf(p.league)) !== league.key) return;
+    const oldPair = [normName(p.homeTeam), normName(p.awayTeam)].sort().join("|");
+    const storedTime = ttTimestampMs(p.eventDate) || ttTimestampMs(p.createdAt);
+    const sameDay = Number.isFinite(storedTime) && watDayKey(storedTime) === fixtureDay;
+    if (oldPair !== pair || !sameDay) return;
+    p.sportyBetEventId = p.sportyBetEventId || lookup;
+    p.bookEventId = String(f.bookEventId || canonical);
+    p.eventId = canonical;
+    if (p.marketKey) p.signature = canonical + "|" + p.marketKey;
+    changed++;
+  });
+  if (changed) { trackerSave(); renderTracker(); engineDebug("Migrated legacy numeric tracker event IDs to canonical SportyBet/Sportradar refs", { count: changed, lookup, canonical }); }
+  return changed;
 }
 function ttTokenEditDistanceOne(a, b) {
   if (a === b) return false;
@@ -3947,38 +4000,50 @@ function ttSportyParticipants(ev) {
 }
 async function ttFetchVerifiedPrematchEvent(f, fresh) {
   const ids = [];
-  /* Old Auto Parlay state may hold sr:match:<id> in sportyBetIds/value.
-     Normalize every stored candidate instead of filtering legacy provider IDs out. */
+  /* Keep SportyBet's numeric lookup ID separate from the canonical sr:match reference used for markets/results. */
   if (Array.isArray(f && f.sportyBetIds)) f.sportyBetIds.forEach((v) => ttAddSportyId(ids, v, true));
+  if (Array.isArray(f && f.sportyBetIds)) f.sportyBetIds.forEach((v) => ttAddSportyId(ids, v, false));
   ttSportyIdCandidates(f || {}).forEach((v) => ttAddSportyId(ids, v, true));
   if (f && /^\d{2,}$/.test(String(f.eventId || "")) && !ids.includes(String(f.eventId))) ids.unshift(String(f.eventId));
   const candidates = [...new Set(ids)].filter((x) => /^\d{2,}$/.test(x));
-  if (!candidates.length) return { err: "No numeric SportyBet event ID was attached to this fixture. Refresh the SportyBet fixture list; no provider ID will be guessed.", transient: false };
+  if (!candidates.length) return { err: "No numeric SportyBet lookup ID is attached to this fixture. Refresh the SportyBet fixture list; a Sportradar ID will not be guessed as a sportsbook ID.", transient: false };
+  const fixtureStarted = Number.isFinite(ttTimestampMs(f && f.start)) && ttTimestampMs(f.start) <= Date.now();
+  const preferLive = !!(f && f.live) || fixtureStarted;
+  const modes = preferLive ? [1, 0] : [0, 1];
   const errs = []; let sawTransient = false;
   const isNet = (e) => /HTTP (408|429|5\d\d)|abort|failed to fetch|networkerror|network request|timed? ?out|load failed/i.test(String(e && e.message || e));
   for (const id of candidates) {
-    let ev = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { ev = await sportyTT("event?id=" + encodeURIComponent(id) + "&live=0", fresh ? 1 : 12000, 15000); break; }
-      catch (e) {
-        errs.push(id + ": " + String(e && e.message || e));
-        if (isNet(e)) { sawTransient = true; if (attempt === 0) { await new Promise((r) => setTimeout(r, 350)); continue; } }
-        break;
+    for (const liveMode of modes) {
+      let ev = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const ttl = fresh || liveMode === 1 ? 1 : 12000;
+          ev = await sportyTT("event?id=" + encodeURIComponent(id) + "&live=" + liveMode, ttl, 15000);
+          break;
+        } catch (e) {
+          errs.push(id + " (live=" + liveMode + "): " + String(e && e.message || e));
+          if (isNet(e)) { sawTransient = true; if (attempt === 0) { await new Promise((r) => setTimeout(r, 350)); continue; } }
+          break;
+        }
       }
+      if (!ev || typeof ev !== "object") continue;
+      const bridge = window.__ttEngineBridge;
+      if (!bridge || typeof bridge.matchIdentity !== "function") return { err: "The shared SportyBet market validator did not initialise. Reload the engine before fetching markets.", transient: false };
+      const participants = ttSportyParticipants(ev);
+      if (!participants.home || !participants.away) { errs.push(id + " (live=" + liveMode + "): event response omitted participant names; exact fixture identity cannot be verified"); continue; }
+      const identity = bridge.matchIdentity(participants.home, participants.away, f.home, f.away);
+      if (!identity.ok) { errs.push(id + " (live=" + liveMode + "): returned participants do not match " + f.home + " v " + f.away); continue; }
+      const state = ttSportyEventState(ev, f.start, liveMode === 1);
+      if (!state.ok) { errs.push(id + " (live=" + liveMode + "): " + state.reason); continue; }
+      if (preferLive && !state.live) { errs.push(id + ": event was not confirmed in-play after scheduled start"); continue; }
+      const bookEventId = ttSportyBookEventRef(ev, f.bookEventId || f.sourceEventId || id);
+      return { ev, id, bookEventId, identity, live: !!state.live, started: !!state.started, err: "" };
     }
-    if (!ev || typeof ev !== "object") continue;
-    const bridge = window.__ttEngineBridge;
-    if (!bridge || typeof bridge.matchIdentity !== "function") return { err: "The shared SportyBet market validator did not initialise. Reload the engine before fetching markets.", transient: false };
-    const participants = ttSportyParticipants(ev);
-    if (!participants.home || !participants.away) { errs.push(id + ": event response did not include both participant names; exact fixture identity cannot be verified"); continue; }
-    const identity = bridge.matchIdentity(participants.home, participants.away, f.home, f.away);
-    if (!identity.ok) { errs.push(id + ": returned event participants do not match " + f.home + " v " + f.away); continue; }
-    const prematch = ttSportyPrematchStatus(ev, f.start);
-    if (!prematch.ok) return { err: prematch.reason, started: !!prematch.started, id };
-    const bookEventId = ttSportyBookEventRef(ev, f.bookEventId || f.sourceEventId || id);
-    return { ev, id, bookEventId, identity, err: "" };
   }
-  return { err: (sawTransient ? "SportyBet Worker/network request failed for the event ID candidates; retry." : "SportyBet rejected the available event ID candidates or returned a different fixture. Refresh fixtures and verify the event ID.") + (errs.length ? " Details: " + errs.slice(0, 3).join("; ") : ""), transient: sawTransient };
+  const prefix = preferLive
+    ? "The match has started, but SportyBet's live event could not be verified by the attached lookup IDs. Refresh Today fixtures and retry; no selection has been guessed."
+    : "SportyBet rejected the attached event IDs or returned a different fixture. Refresh the SportyBet fixture list and verify the event ID.";
+  return { err: prefix + (sawTransient ? " Network/worker failures were also seen." : "") + (errs.length ? " Details: " + errs.slice(0, 4).join("; ") : ""), transient: sawTransient };
 }
 
 /* ---------------- match normalisation + validity (walkover / retirement / abandoned filtering) ---------------- */
@@ -4297,19 +4362,23 @@ async function loadFixtures(dayOffset) {
       const nm = normLeagueName((c && c.name || "") + " - " + (c && c.tournament && c.tournament.name || ""));
       const st = ttTimestampMs(ev.estimateStartTime != null ? ev.estimateStartTime : ev.startTime);
       if (nm !== lg.name || !Number.isFinite(st) || st < s || st >= e) return;
-      const status = Number(ev.status);
-      if ((Number.isFinite(status) && status !== 0) || st <= Date.now() || /ended|closed|cancel|abandon|walkover|retired|set \d|live|break|interrupt/i.test(String(ev.matchStatus || "")) && !/not start/i.test(String(ev.matchStatus || ""))) return;
+      const status = Number(ev.status), live = ttSportyIsLive(ev), statusText = ttSportyStatusText(ev);
+      if (ttSportyIsClosed(ev)) return;
+      if (!live && Number.isFinite(status) && status !== 0) return;
+      if (!live && st <= Date.now()) return;
+      if (!Number.isFinite(st)) return;
       const ids = ttSportyIdCandidates(ev); if (!ids.length) { skippedNoId++; return; }
       const id = ids[0], home = String(ev.homeTeamName || ev.home && ev.home.name || "").trim(), away = String(ev.awayTeamName || ev.away && ev.away.name || "").trim();
       if (!home || !away || normName(home) === normName(away)) return;
       const bookEventId = ttSportyBookEventRef(ev, ev.eventId || id);
-      out.set(id, { eventId: id, sportyBetIds: ids, bookEventId, sourceEventId: String(ev.eventId || ""), home, away, start: st, live: false, src: "SportyBet" });
+      out.set(id, { eventId: id, sportyBetIds: ids, bookEventId, sourceEventId: String(ev.eventId || ""), home, away, start: st, live, statusText, src: "SportyBet" });
     }));
   } catch (er) { errs.push("SportyBet fixtures: " + (er && er.message || er)); }
   AppState.fixtures = [...out.values()].sort((x, y) => x.start - y.start);
-  sel.innerHTML = '<option value="">- Select match -</option>' + AppState.fixtures.map((f, i) => `<option value="${i}">${fmtT(f.start)} ${escapeHtml(f.home)} vs ${escapeHtml(f.away)}</option>`).join("");
+  sel.innerHTML = '<option value="">- Select match -</option>' + AppState.fixtures.map((f, i) => `<option value="${i}">${f.live ? "🔴 LIVE · " : ""}${fmtT(f.start)} ${escapeHtml(f.home)} vs ${escapeHtml(f.away)}</option>`).join("");
   const n = AppState.fixtures.length;
-  const msg = n ? `${n} SportyBet prematch fixture(s) ${dayOffset ? "tomorrow" : "today"} (WAT).` + (skippedNoId ? ` ${skippedNoId} entry/entries skipped because the SportyBet lookup ID was missing.` : "") + (errs.length ? " Partial: " + errs.join("; ") : "") : "No verified SportyBet prematch fixtures found. " + (skippedNoId ? skippedNoId + " listed event(s) had no usable SportyBet ID. " : "") + errs.join("; ");
+  const liveCount = AppState.fixtures.filter((f) => f.live).length;
+  const msg = n ? `${n} verified SportyBet fixture(s) ${dayOffset ? "tomorrow" : "today"} (WAT) · ${liveCount} live, ${n - liveCount} upcoming.` + (skippedNoId ? ` ${skippedNoId} entry/entries skipped because the SportyBet lookup ID was missing.` : "") + (errs.length ? " Partial: " + errs.join("; ") : "") : "No verified SportyBet fixtures found for " + (dayOffset ? "tomorrow" : "today") + ". " + (skippedNoId ? skippedNoId + " listed event(s) had no usable SportyBet ID. " : "") + errs.join("; ");
   fetchDone(msg, !n);
 }
 /* visible blank moment: let the wiped page paint (2 frames) and hold ~400 ms before any data lands, cached or not */
@@ -4318,6 +4387,7 @@ async function onFixtureSelect() {
   const sel = document.getElementById("fixtureSelect"); const f = AppState.fixtures[Number(sel.value)];
   clearInputs(); if (!f) return;
   AppState.fixture = f; AppState.bo = Number.isFinite(f.bo) ? f.bo : defaultBo(curLeague());
+  ttMigrateTrackedEventRef(f);
   setVal("teamAName", f.home); setVal("teamBName", f.away); relabel();
   accordionOpen("fixtureSection");
   engineDebug("Fixture selected: " + f.home + " v " + f.away + " (" + f.eventId + ", " + f.src + ")");
@@ -4433,7 +4503,7 @@ function pickMainLine(markets, id, gameOne, eventId) {
 async function fetchLines() {
   const f = AppState.fixture, lg = curLeague();
   if (!lg || !f) { marketStatus("Choose a SportyBet fixture above.", true); return; }
-  marketStatus("SportyBet market lookup: verifying " + f.home + " v " + f.away + "…");
+  marketStatus((f.live || (Number.isFinite(ttTimestampMs(f.start)) && ttTimestampMs(f.start) <= Date.now()) ? "SportyBet live-market lookup: verifying " : "SportyBet prematch-market lookup: verifying ") + f.home + " v " + f.away + "…");
   AppState.odds = null; AppState.sportyEvent = null; AppState.sportyEventLookupId = null; setTag("mAutoTag", false);
   const result = await ttFetchVerifiedPrematchEvent(f, false);
   if (AppState.fixture !== f) { engineDebug("market lookup discarded (match changed)"); return; }
@@ -4461,7 +4531,8 @@ async function fetchLines() {
     marketStatus("SportyBet event identity is verified, but these requested markets are open and could not be parsed exactly: " + parseIssues.join(", ") + ". No market is treated as absent and no projection or selection is allowed until the parser can read the actual outcomes/specifier.", true);
     return;
   }
-  AppState.odds = { ft: ft || null, h1: h1 || null, win: win || null, oe: oe || null, eventId: bookEventId, lookupId: result.id, verified: true, fetchedAt: Date.now() };
+  f.live = !!result.live;
+  AppState.odds = { ft: ft || null, h1: h1 || null, win: win || null, oe: oe || null, eventId: bookEventId, lookupId: result.id, live: !!result.live, verified: true, fetchedAt: Date.now() };
   const filled = [];
   if (ft) { setVal("ftMarket", ft.line); filled.push("Total " + ft.line); } else setVal("ftMarket", "");
   if (h1) { setVal("h1Market", h1.line); filled.push("1st set total " + h1.line); } else setVal("h1Market", "");
@@ -4473,7 +4544,8 @@ async function fetchLines() {
   if (totalAvailable && !ft) msg += " Full-game total: not listed (projection only).";
   if (totalAvailable && !h1) msg += " First-set total: not listed (projection only).";
   if (!totalAvailable) msg += " Per the market rule, the engine will show Winner only; Odd/Even and totals are suppressed.";
-  msg += " Prices are prematch-only and must be refreshed before Run.";
+  if (result.live) msg += " LIVE prices verified. The current statistical model is prematch-only and does not include the live score/set state, so Run will safely return NO PLAY for this event.";
+  else msg += " Prematch prices verified; refresh before Run.";
   marketStatus(msg, !filled.length);
 }
 /* ---------------- model ---------------- */
@@ -4796,6 +4868,13 @@ function runEngine() {
     renderRows(table, rows, lg, document.getElementById("teamAName").value.trim(), document.getElementById("teamBName").value.trim(), null);
     return;
   }
+  const selectedFixture = AppState.fixture;
+  const selectedStarted = !!(odds.live || (selectedFixture && selectedFixture.live) || (selectedFixture && Number.isFinite(ttTimestampMs(selectedFixture.start)) && ttTimestampMs(selectedFixture.start) <= Date.now()));
+  if (selectedStarted) {
+    ["ft", "h1", "win", "oe"].forEach((mk) => rows.push(noPlay(mk, NaNv, NaNv, "SportyBet live market is visible, but this model is calibrated for pre-match play and does not include the current in-play score/set state. No live prediction or bet is generated.")));
+    renderRows(table, rows, lg, document.getElementById("teamAName").value.trim(), document.getElementById("teamBName").value.trim(), null);
+    return;
+  }
   const lineFt = parseLine("ftMarket"), lineH1 = parseLine("h1Market"), bo = AppState.bo, L = lg ? leagueStats(lg, bo) : null;
   const A = readPlayer("a"), B = readPlayer("b");
   const nameA = document.getElementById("teamAName").value.trim(), nameB = document.getElementById("teamBName").value.trim();
@@ -4927,9 +5006,10 @@ function trackerSave() { trackerDebug("tracker save", { picks: g_tracker.picks.l
 function watDayKey(ms) { return Math.floor((ms + 3600000) / 86400000); }
 function trackerCorrelationBlock(lg, A, B) {
   const f = AppState.fixture; const day = watDayKey(f && f.start ? f.start : Date.now()); /* the event's WAT day, not the day the pick was created */
+  const currentEventRef = ttCanonicalPickEventId(f);
   const nA = normName(A), nB = normName(B), pair = [nA, nB].sort().join("|"); const out = {};
   ["ft", "h1", "win", "oe"].forEach((mk) => {
-    const same = g_tracker.picks.filter((p) => !p.lean && p.resultStatus !== "void" && p.marketKey === mk && (p.leagueKey || leagueKeyOf(p.league)) === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== (f && f.eventId));
+    const same = g_tracker.picks.filter((p) => !p.lean && p.resultStatus !== "void" && p.marketKey === mk && (p.leagueKey || leagueKeyOf(p.league)) === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== currentEventRef);
     const names = (p) => [normName(p.homeTeam), normName(p.awayTeam)];
     const pairN = same.filter((p) => names(p).slice().sort().join("|") === pair).length;
     const plA = same.filter((p) => names(p).includes(nA)).length, plB = same.filter((p) => names(p).includes(nB)).length;
@@ -4940,17 +5020,18 @@ function trackerCorrelationBlock(lg, A, B) {
 }
 function trackPicks(list, lg, A, B) {
   const f = AppState.fixture; if (!f || !f.eventId) { addIssue("Pick not tracked: no verified SportyBet fixture is selected."); return; }
+  const trackedEventId = ttCanonicalPickEventId(f);
   list.forEach((p) => {
-    const sig = f.eventId + "|" + p.marketKey; const ex = g_tracker.picks.find((x) => x.signature === sig);
+    const sig = trackedEventId + "|" + p.marketKey; const ex = g_tracker.picks.find((x) => x.signature === sig || (x.marketKey === p.marketKey && String(x.eventId || "") === trackedEventId));
     const fields = { bo: AppState.bo, line: p.line, side: p.side, pick: p.pick, grade: p.grade, mv: TT_MODEL_VERSION, proj: isFiniteVal(p.proj) ? Math.round(p.proj * 10) / 10 : NaNv, edge: isFiniteVal(p.edge) ? Math.round(p.edge * 10) / 10 : NaNv, prob: isFiniteVal(p.pSide) ? Math.round(p.pSide * 1000) / 1000 : NaNv, odds: isFiniteVal(p.oddsUsed) ? p.oddsUsed : isFiniteVal(p.odds) ? p.odds : NaNv, ev: isFiniteVal(p.ev) ? Math.round(p.ev * 1000) / 1000 : NaNv };
     if (ex) { if (ex.resultStatus === "pending" && !ex.lean && Date.now() < f.start) { const was = Object.keys(fields).reduce((o, k) => { o[k] = ex[k]; return o; }, {}); if (JSON.stringify(was) !== JSON.stringify(fields)) { const moved = ex.line !== p.line || ex.side !== p.side; Object.assign(ex, fields); ex.synced = false; if (moved) addIssue("Tracked pick refreshed with the latest run: " + p.pick); } } return; } /* LOCK-58: every field follows the latest pre-match run */ /* a pending pre-match pick follows the latest run; settled/started picks are never rewritten */
-    g_tracker.picks.unshift(Object.assign({ signature: sig, eventId: f.eventId, leagueKey: lg.key, league: lg.name, homeTeam: A, awayTeam: B, pairKey: [normName(A), normName(B)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.marketKey, market: TT_MARKETS[p.marketKey].label, resultStatus: "pending", actual: NaNv, build: TT_BUILD }, fields));
+    g_tracker.picks.unshift(Object.assign({ signature: sig, eventId: trackedEventId, sportyBetEventId: String(f.eventId), bookEventId: String(f.bookEventId || trackedEventId), leagueKey: lg.key, league: lg.name, homeTeam: A, awayTeam: B, pairKey: [normName(A), normName(B)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.marketKey, market: TT_MARKETS[p.marketKey].label, resultStatus: "pending", actual: NaNv, build: TT_BUILD }, fields));
   });
   trackerSave(); renderTracker(); syncPicksToWorker();
 }
 /* latest run says NO PLAY: withdraw an earlier pre-match pick that was never synced/started (synced picks are only flagged) */
 function withdrawPendingPick(marketKey) {
-  const f = AppState.fixture; if (!f || !f.eventId || !(Date.now() < f.start)) return; const sig = f.eventId + "|" + marketKey; const i = g_tracker.picks.findIndex((x) => x.signature === sig && x.resultStatus === "pending" && !x.lean);
+  const f = AppState.fixture; if (!f || !f.eventId || !(Date.now() < f.start)) return; const trackedEventId = ttCanonicalPickEventId(f), sig = trackedEventId + "|" + marketKey; const i = g_tracker.picks.findIndex((x) => (x.signature === sig || (x.eventId === trackedEventId && x.marketKey === marketKey)) && x.resultStatus === "pending" && !x.lean);
   if (i < 0) return; const x = g_tracker.picks[i];
   if (!x.synced) { g_tracker.picks.splice(i, 1); trackerSave(); renderTracker(); addIssue("Earlier tracked pick withdrawn: latest run is NO PLAY (" + x.pick + ")."); } else { x.resultStatus = "void"; x.withdrawn = true; x.settledBy = "withdrawn"; x.settledAt = Date.now(); x.synced = false; trackerSave(); renderTracker(); syncPicksToWorker(); addIssue("Earlier pick " + x.pick + " voided: the latest run is NO PLAY (it had already been synced)."); } /* LOCK-55 */
 }
@@ -5234,10 +5315,12 @@ const AFDB = (function () {
     const driftHtml = '<div style="padding:6px 12px;background:#0d0d0d;border-bottom:1px solid #1a1a1a;display:flex;align-items:center;gap:16px;flex-wrap:wrap;flex-shrink:0;"><span style="color:#555;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;">\ud83d\udcd0 DRIFT TRACKER</span><span style="color:' + _rmeColor + ';font-size:12px;font-weight:900;">Rolling Mean Error (last 20): ' + _rmeDisplay + '</span><span style="color:#555;font-size:10px;">' + errs.length + " samples logged</span></div>";
     const knownIssuesHtml = '<details style="background:#0d0d0d;border-bottom:1px solid #1a1a1a;flex-shrink:0;"><summary style="padding:8px 12px;color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.8px;cursor:pointer;list-style:none;">\ud83d\udee0\ufe0f KNOWN ISSUES \u2014 ARRESTED &amp; FIXED (tap to expand)</summary><div style="padding:2px 12px 10px 12px;color:#999;font-size:10px;line-height:1.6;">' +
       '<div><b style="color:#49d45f;">ISSUE-TT-01</b> &mdash; Selecting a match did not fetch anything: stats and market lines only loaded after tapping the buttons. Fixed: choosing a fixture now runs player stats + H2H and the market-line lookup in parallel, with step-by-step status notes.</div>' +
-      '<div><b style="color:#49d45f;">ISSUE-TT-02</b> &mdash; Match list showed live and finished matches. Fixed: only upcoming (not started) matches are listed.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-TT-02</b> &mdash; Match list did not distinguish active, upcoming and closed events. Fixed: active in-play and upcoming events are listed; finished, cancelled, suspended and other closed events are excluded.</div>' +
       '<div><b style="color:#49d45f;">ISSUE-TT-03</b> &mdash; Sportradar history blocked on some phones. Fixed: requests go through the tt-engine worker first, direct as fallback.</div>' +
-      '<div><b style="color:#49d45f;">ISSUE-TT-04</b> &mdash; Engine Report / Debug / Health pages blank. Fixed: analytics view toggles restored.</div>' +
-      '<div><b style="color:#49d45f;">ISSUE-TT-05</b> &mdash; Settlement on 0-0 / unfinished scores. Fixed: only a valid final (every set &ge;11 with a 2-point margin, winner reached the format set count) settles; otherwise the pick stays pending and is retried.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-TT-04</b> &mdash; Live SportyBet fixtures were filtered out and market lookup always forced live=0. Fixed: current-day in-play fixtures are selectable, lookup tries live=1/0 with exact participant verification, and the pre-match model is blocked from producing live picks without score-aware inputs.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-TT-05</b> &mdash; New tracker rows used the numeric lookup ID while live polling/settlement used canonical sr:match IDs. Fixed: canonical IDs are stored for tracking/results and numeric SportyBet IDs are retained separately for lookup.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-TT-06</b> &mdash; Engine Report / Debug / Health pages blank. Fixed: analytics view toggles restored.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-TT-07</b> &mdash; Settlement on 0-0 / unfinished scores. Fixed: only a valid final (every set &ge;11 with a 2-point margin, winner reached the format set count) settles; otherwise the pick stays pending and is retried.</div>' +
       "</div></details>";
     panel.innerHTML = '<div style="background:#080808;border-bottom:1px solid #222;padding:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;flex-shrink:0;"><div style="color:#d4af37;font-size:14px;font-weight:900;letter-spacing:1px;">\ud83d\udd2c AUTO-FETCH DEBUG BRAIN (TT)</div><div style="display:flex;gap:8px;flex-wrap:wrap;">' + headerBtns + "</div></div>" + driftHtml + knownIssuesHtml +
       '<div style="display:flex;flex-direction:column;flex:1;overflow-y:auto;background:#0a0a0a;"><div style="flex:1;"><div style="padding:10px 12px;background:#111;color:#d4af37;font-size:11px;font-weight:900;text-transform:uppercase;position:sticky;top:0;z-index:10;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center;"><span>\ud83d\udce1 FETCH & ENGINE LOGS</span><button onclick="AFDB.toggleFilter()" style="background:none;border:none;color:#4ea9ff;font-size:14px;font-weight:bold;cursor:pointer;">' + filterLabel + '</button></div><div style="padding-bottom:15px;">' +
@@ -6822,9 +6905,9 @@ function histFor(lg) {
   p.catch(() => { if (HC[lg.key] && HC[lg.key].p === p) delete HC[lg.key]; }); return p;
 }
 function guard(lg, f) {
-  const day = watDayKey(f.start), nA = normName(f.home), nB = normName(f.away), pair = [nA, nB].sort().join("|"), out = {};
+  const day = watDayKey(f.start), currentEventRef = ttCanonicalPickEventId(f), nA = normName(f.home), nB = normName(f.away), pair = [nA, nB].sort().join("|"), out = {};
   ["ft", "h1", "win", "oe"].forEach((mk) => {
-    const same = g_tracker.picks.filter((p) => !p.lean && p.resultStatus !== "void" && p.marketKey === mk && (p.leagueKey || leagueKeyOf(p.league)) === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== f.eventId);
+    const same = g_tracker.picks.filter((p) => !p.lean && p.resultStatus !== "void" && p.marketKey === mk && (p.leagueKey || leagueKeyOf(p.league)) === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== currentEventRef);
     const names = (p) => [normName(p.homeTeam), normName(p.awayTeam)];
     const pairN = same.filter((p) => names(p).slice().sort().join("|") === pair).length, plA = same.filter((p) => names(p).includes(nA)).length, plB = same.filter((p) => names(p).includes(nB)).length;
     if (pairN >= TT_CONFIG.maxPairPicksPerDay) out[mk] = "Correlation guard: " + pairN + " pick(s) already on this pairing today.";
@@ -6834,11 +6917,12 @@ function guard(lg, f) {
 }
 function trackIt(r, f, lg, plays) {
   const r1 = (v) => isFiniteVal(v) ? Math.round(Number(v) * 1000) / 1000 : NaNv;
+  const trackedEventId = r.eventId || ttCanonicalPickEventId(f);
   plays.forEach((p) => {
-    const sig = f.eventId + "|" + p.mk, ex = g_tracker.picks.find((x) => x.signature === sig);
+    const sig = trackedEventId + "|" + p.mk, ex = g_tracker.picks.find((x) => x.signature === sig || (x.marketKey === p.mk && String(x.eventId || "") === trackedEventId));
     const fields = { bo: r.bo, line: p.line, side: p.side, pick: p.pick, grade: p.grade, mv: TT_MODEL_VERSION, modelVersion: TT_MODEL_VERSION, proj: isFiniteVal(p.proj) ? Math.round(p.proj * 10) / 10 : NaNv, edge: isFiniteVal(p.edge) ? Math.round(p.edge * 10) / 10 : NaNv, prob: r1(p.pSide), probAdj: r1(p.pAdj), pPush: r1(p.pPush || 0), odds: r1(p.odds), ev: r1(p.ev) };
     if (ex) { if (ex.resultStatus === "pending" && !ex.lean && Date.now() < f.start) { Object.assign(ex, fields); ex.synced = false; } return; }
-    g_tracker.picks.unshift(Object.assign({ signature: sig, eventId: f.eventId, leagueKey: lg.key, league: lg.name, homeTeam: f.home, awayTeam: f.away, pairKey: [normName(f.home), normName(f.away)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.mk, market: TT_MARKETS[p.mk].label, resultStatus: "pending", actual: NaNv, build: TT_BUILD }, fields));
+    g_tracker.picks.unshift(Object.assign({ signature: sig, eventId: trackedEventId, sportyBetEventId: String(f.eventId), bookEventId: String(f.bookEventId || trackedEventId), leagueKey: lg.key, league: lg.name, homeTeam: f.home, awayTeam: f.away, pairKey: [normName(f.home), normName(f.away)].sort().join("|"), eventDate: f.start, createdAt: Date.now(), marketKey: p.mk, market: TT_MARKETS[p.mk].label, resultStatus: "pending", actual: NaNv, build: TT_BUILD }, fields));
   });
   trackerSave(); renderTracker(); syncPicksToWorker(); r.tracked = true;
 }
@@ -6937,7 +7021,7 @@ root.__ttEngineBridge = Object.freeze({
 });
 async function ttPredictCore(f, opts) {
   opts = opts || {};
-  const lg = TT_LEAGUES[f.lk], r = { eventId: f.eventId, lk: f.lk, league: lg.name, home: f.home, away: f.away, start: f.start, at: Date.now() };
+  const lg = TT_LEAGUES[f.lk], r = { eventId: ttCanonicalPickEventId(f), sportyBetEventId: String(f.eventId || ""), bookEventId: String(f.bookEventId || ""), lk: f.lk, league: lg.name, home: f.home, away: f.away, start: f.start, at: Date.now() };
   if (f.start <= Date.now()) { r.status = "started"; r.reason = "match has started; prematch predictions are locked"; return r; }
   const ln = await getLines(f);
   if (ln.err) { r.status = ln.started ? "started" : "error"; r.retry = !ln.started; r.reason = ln.err; return r; }
@@ -7500,7 +7584,7 @@ async function validateLegs(candidates, skipped) {
     var good = { ok: true, game: g, book: { eventId: k.eventId, marketId: k.marketId, specifier: k.specifier, outcomeId: k.outcomeId } };
     if (ctx.valOk[ck] && Date.now() - ctx.valOk[ck] < 60000) return good;
     try {
-      var fresh = await withTimeout(getLines({ eventId: g.value || k.eventId, home: g.home, away: g.away }, true), 40000);
+      var fresh = await withTimeout(getLines({ eventId: g.value || k.eventId, sportyBetIds: g.sportyBetIds || [g.value || k.eventId], bookEventId: g.bookEventId || g.sourceEventId || k.eventId, sourceEventId: g.sourceEventId || "", home: g.home, away: g.away, start: startMs(g) }, true), 40000);
       if (fresh === "__timeout__") return { ok: false, reason: name + " (live line check timed out)" };
       if (!fresh || fresh.err) return { ok: false, reason: name + " (" + String(fresh && fresh.err || "live lines unavailable") + ")" };
       var b = g.best, live = ttFreshBookPick(fresh, { mk: b.marketKey, side: b.side, line: b.line });
