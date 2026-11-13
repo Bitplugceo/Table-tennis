@@ -1,3 +1,4 @@
+M
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3753,7 +3754,7 @@ body.dark-mode .tracker-analytics-section-head {
    probability + odds/EV gates; median-consistent calibration; deterministic history load; stats/best-of/H2H coherence;
    Unicode-safe name matching; strict series parsing; sample SD; WAT day bounds; tracker stale-pick handling; honest report stats. */
 function isFiniteVal(v) { if (typeof v === "number") return Number.isFinite(v); if (typeof v === "string") return v.trim() !== "" && Number.isFinite(Number(v)); return false; }
-const TT_BUILD = "tt-engine-v1.5-20261113-sportybet-fetch-restore";
+const TT_BUILD = "tt-engine-v1.6-20261113-upcoming-only-bestof-bookdata-fix";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
 const WORKER_BASE_URL = WORKER_URL.replace(/\/+$/, "");
 const SR_GISMO = "https://stats.fn.sportradar.com/sportradar/en/Etc:UTC/gismo/";
@@ -3905,9 +3906,11 @@ function ttSportyIdCandidates(obj) {
   if (!obj || typeof obj !== "object") return [];
   const out = [];
   ["sportyBetEventId", "sportybetEventId", "sportsbookEventId", "bookmakerEventId", "sbEventId", "sportyId"].forEach((k) => ttAddSportyId(out, obj[k], true));
-  /* Prefer a numeric sportsbook id field over the suffix of a provider-style eventId. */
-  ["id", "eventId", "event_id", "matchId", "match_id", "gameId", "game_id"].forEach((k) => ttAddSportyId(out, obj[k], false));
+  /* Match the first engine: use SportyBet's eventId first. Generic id is only a fallback
+     because some feeds expose an internal row id there that the event route rejects. */
+  ["eventId", "event_id", "sportyBetEventId", "sportybetEventId", "sportsbookEventId", "bookmakerEventId", "sbEventId", "sportyId", "matchId", "match_id", "gameId", "game_id"].forEach((k) => ttAddSportyId(out, obj[k], false));
   ["eventId", "event_id", "matchId", "match_id", "gameId", "game_id"].forEach((k) => ttAddSportyId(out, obj[k], true));
+  ["id"].forEach((k) => ttAddSportyId(out, obj[k], false));
   return out;
 }
 function ttSportyBookEventRef(ev, fallback) {
@@ -4016,27 +4019,33 @@ async function ttFetchVerifiedPrematchEvent(f, fresh) {
     return result;
   };
 
-  /* First use the current TT worker route and every concrete numeric SportyBet ID exposed by the feed. */
+  /* Match the first engine's two SportyBet event-feed modes. Some fixtures expose
+     markets only through live=1 even before the match starts. The identity and
+     prematch checks below still reject an actual in-play event. */
   for (const id of candidates) {
-    let ev = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        ev = await sportyTT("event?id=" + encodeURIComponent(id) + "&live=0", fresh ? 1 : 12000, 15000);
-        break;
-      } catch (e) {
-        errs.push(id + ": " + String(e && e.message || e));
-        if (isNet(e)) {
-          sawTransient = true;
-          if (attempt === 0) { await new Promise((r) => setTimeout(r, 350)); continue; }
+    let accepted = false;
+    for (const live of [0, 1]) {
+      let ev = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          ev = await sportyTT("event?id=" + encodeURIComponent(id) + "&live=" + live, fresh ? 1 : 12000, 15000);
+          break;
+        } catch (e) {
+          errs.push(id + " live=" + live + ": " + String(e && e.message || e));
+          if (isNet(e)) {
+            sawTransient = true;
+            if (attempt === 0) { await new Promise((r) => setTimeout(r, 350)); continue; }
+          }
+          break;
         }
-        break;
       }
+      const checked = verify(ev, id, "");
+      if (checked && checked.fatal) return { err: checked.fatal, transient: false };
+      if (checked && checked.rejected) return checked;
+      if (checked && checked.noMarkets) { if (!verifiedWithoutMarkets) verifiedWithoutMarkets = checked; continue; }
+      if (checked) { accepted = true; return checked; }
     }
-    const checked = verify(ev, id, "");
-    if (checked && checked.fatal) return { err: checked.fatal, transient: false };
-    if (checked && checked.rejected) return checked;
-    if (checked && checked.noMarkets) { if (!verifiedWithoutMarkets) verifiedWithoutMarkets = checked; continue; }
-    if (checked) return checked;
+    if (accepted) break;
   }
 
   /* Then restore the first engine's exact legacy lookup for canonical Sportradar references.
@@ -4406,8 +4415,11 @@ async function loadFixtures(dayOffset) {
             if (!m || !m._id || !m._dt || !m._dt.uts || !m.teams || !m.teams.home || !m.teams.away) return;
             const st = Number(m._dt.uts) * 1000, home = String(m.teams.home.name || "").trim(), away = String(m.teams.away.name || "").trim();
             if (!home || !away || !Number.isFinite(st) || st < s || st >= e || st <= Date.now()) return;
-            if ((m.status && m.status.name && !/^not started$/i.test(m.status.name)) ||
-                (m.matchstatus && m.matchstatus !== "upcoming") ||
+            const statusName = String(m.status && m.status.name || "").trim();
+            const matchStatus = String(m.matchstatus || "").trim().toLowerCase();
+            if ((!/^not started$/i.test(statusName) && matchStatus !== "upcoming") ||
+                (statusName && !/^not started$/i.test(statusName)) ||
+                (matchStatus && matchStatus !== "upcoming") ||
                 m.cancelled || m.walkover || m.postponed || m.removed || m.retired) return;
             const duplicate = [...out.values()].some((x) => {
               const same = (normName(x.home) === normName(home) && normName(x.away) === normName(away)) ||
@@ -6287,6 +6299,13 @@ function startMs(g) {
   var t = Date.parse(String(v)); return isFinite(t) ? t : NaN;
 }
 function hasStarted(g) { var t = startMs(g); return isFinite(t) && t <= Date.now(); }
+/* Only show/queue fixtures whose confirmed start is still safely in the future.
+   The 60-second buffer avoids a game starting while its prediction is being fetched. */
+function ttAutoUpcoming(g, now) {
+  if (!g || g.status === "gone") return false;
+  var t = startMs(g), n = Number.isFinite(now) ? now : Date.now();
+  return Number.isFinite(t) && t > n + 60000;
+}
 function fmtTime(g) { var t = startMs(g); return isFinite(t) ? fmtT(t) : "—"; }
 function ago(ts) {
     var s = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -6320,7 +6339,10 @@ function load(srcObj) {
     if (!s.run.info || typeof s.run.info !== "object") s.run.info = {};
      
     var cutoff = dayKeyOf(-1);
-    Object.keys(s.games).forEach(function (k) { var g = s.games[k]; if (!g || !g.dayKey || String(g.dayKey) < cutoff) delete s.games[k]; });
+    Object.keys(s.games).forEach(function (k) {
+      var g = s.games[k];
+      if (!g || !g.dayKey || String(g.dayKey) < cutoff || !ttAutoUpcoming(g)) delete s.games[k];
+    });
      
      
     Object.keys(s.odds).forEach(function (k) {
@@ -6760,12 +6782,23 @@ async function discover(league, dk) {
   var lg = TT_LEAGUES[league]; if (!lg) throw new Error("League not available in the engine");
   var z = await fetchFixtures(lg, off);
   if (!z.list.length && z.errs && z.errs.length) throw new Error(String(z.errs[0]).slice(0, 100));
-  var fresh = 0;
-  z.list.forEach(function (f) {
-    var key = league + "|" + f.eventId;
-    if (S.games[key]) { Object.assign(S.games[key], { value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, bo: isFinite(f.bo) ? f.bo : S.games[key].bo }); return; }
-    S.games[key] = { key: key, league: league, leagueLabel: leagueLabel(league), value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, dayKey: dk, status: "pending", at: 0, bo: isFinite(f.bo) ? f.bo : null };
+  var fresh = 0, liveKeys = new Set();
+  z.list.filter(function (f) { return Number.isFinite(Number(f.start)) && Number(f.start) > Date.now() + 60000; }).forEach(function (f) {
+    var key = league + "|" + f.eventId; liveKeys.add(key);
+    if (S.games[key]) {
+      var old = S.games[key];
+      Object.assign(old, { value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, bo: [3, 5, 7].includes(Number(f.bo)) ? Number(f.bo) : ([3, 5, 7].includes(Number(old.bo)) ? Number(old.bo) : null) });
+      if (old.status === "gone") { old.status = "pending"; old.err = ""; old.at = 0; }
+      return;
+    }
+    S.games[key] = { key: key, league: league, leagueLabel: leagueLabel(league), value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, dayKey: dk, status: "pending", at: 0, bo: [3, 5, 7].includes(Number(f.bo)) ? Number(f.bo) : null };
     fresh++;
+  });
+  /* A successful current feed replaces the old queue for this league/day. This removes
+     fixtures that disappeared from SportyBet as well as saved rows that have started. */
+  Object.keys(S.games).forEach(function (key) {
+    var g = S.games[key];
+    if (g && g.dayKey === dk && g.league === league && !liveKeys.has(key)) delete S.games[key];
   });
   S.run.info[league + "|" + dk] = { n: z.list.length, fresh: fresh, at: Date.now(), probed: 1 };
   try { availableMap(dk)[league] = z.list.length; } catch (e) {}
@@ -6777,12 +6810,17 @@ async function predictOne(g) {
   if (!isFinite(off) || off < 0) { g.status = "gone"; g.err = "Match day already passed"; g.at = Date.now(); return; }
   if (hasStarted(g)) { g.status = "gone"; g.err = "Already started"; g.at = Date.now(); return; }
   if (!TT_LEAGUES[g.league]) { setErr(g, "League is not available in the engine"); return; }
-  var f = { eventId: g.value, sportyBetIds: g.sportyBetIds || [g.value], bookEventId: g.bookEventId || g.sourceEventId || g.value, sourceEventId: g.sourceEventId || "", home: g.home, away: g.away, start: startMs(g), bo: Number(g.bo), lk: g.league };
+  var lg = TT_LEAGUES[g.league], storedBo = Number(g.bo);
+  var safeBo = [3, 5, 7].includes(storedBo) ? storedBo : defaultBo(lg);
+  var f = { eventId: g.value, sportyBetIds: g.sportyBetIds || [g.value], bookEventId: g.bookEventId || g.sourceEventId || g.value, sourceEventId: g.sourceEventId || "", home: g.home, away: g.away, start: startMs(g), bo: safeBo, lk: g.league };
   var r = await ttPredictCore(f);
   if (!ctx.want) return;
   g.at = Date.now(); g.err = ""; g.eventId = String(g.value);
-  if (isFinite(Number(r.bo))) g.bo = Number(r.bo);
+  if (isFinite(Number(r.bo)) && [3, 5, 7].includes(Number(r.bo))) g.bo = Number(r.bo);
   if (r.status === "started") { g.status = "gone"; g.err = String(r.reason || "Already started").slice(0, 160); return; }
+  if (r.status === "nodata" || (r.status === "noplay" && /^no .* data for best-of|^no results history|^recent history/i.test(String(r.reason || "")))) {
+    g.status = "nodata"; g.err = String(r.reason || "No recent stats found").slice(0, 160); g.best = null; g.alts = []; g.projections = []; g.nPlays = 0; return;
+  }
   if (r.status === "noline" || r.status === "error") {
     var confirmedNoLines = r.status === "noline" && !/do not match/i.test(String(r.reason || ""));
     g.status = confirmedNoLines ? "noline" : "error";
@@ -6800,9 +6838,6 @@ async function predictOne(g) {
   g.lineStatus = r.sig ? "loaded" : "no-open-markets";
   g.sig = r.sig || null; g.sbId = String(g.value); g.chk = Date.now();
   g.bkTried = 1; g.ptried = AP_PV;
-  if (r.status === "noplay" && /^no .* data for best-of|^no results history|^recent history/i.test(String(r.reason || ""))) {
-    g.status = "nodata"; g.err = String(r.reason || "No recent stats found").slice(0, 160); g.best = null; g.alts = []; g.nPlays = 0; return;
-  }
   var res = bestOfGame(Array.isArray(r.alts) ? r.alts : []);
   g.nPlays = res.n;
   if (res.best) { g.status = "play"; g.best = res.best; g.alts = res.alts && res.alts.length ? res.alts : [res.best]; }
@@ -6859,7 +6894,10 @@ async function scanDay(dk, force, onProgress) {
 function ttLeaguesForDay(dk) {
   var c = LCACHE[dk], res = { leagues: {}, unmatched: [], total: 0, failedPages: [], at: c ? c.at : null };
   if (!c) return res;
-  Object.keys(c.lists).forEach(function (k) { var n = (c.lists[k] || []).length; if (n > 0 && TT_LEAGUES[k]) { res.leagues[k] = n; res.total += n; } });
+  Object.keys(c.lists).forEach(function (k) {
+    var n = (c.lists[k] || []).filter(function (f) { return f && Number.isFinite(Number(f.start)) && Number(f.start) > Date.now() + 60000; }).length;
+    if (n > 0 && TT_LEAGUES[k]) { res.leagues[k] = n; res.total += n; }
+  });
   res.failedPages = Object.keys(c.errs);
   return res;
 }
@@ -6870,10 +6908,18 @@ async function fetchFixtures(lg, dayOffset) {
     (Array.isArray(d) ? d : d.tournaments || []).forEach((t) => (t.events || []).forEach((ev) => {
       const c = ev.sport && ev.sport.category;
       const nm = normLeagueName((c && c.name || "") + " - " + (c && c.tournament && c.tournament.name || ""));
-      const st = ttTimestampMs(ev.estimateStartTime != null ? ev.estimateStartTime : ev.startTime), ms = String(ev.matchStatus || "");
+      const st = ttTimestampMs(ev.estimateStartTime != null ? ev.estimateStartTime : ev.startTime != null ? ev.startTime : ev.scheduledStartTime);
+      const ms = String(ev.matchStatus || ev.statusName || ev.statusText || "").trim();
       if (nm !== lg.name || !Number.isFinite(st) || st < s || st >= e) return;
-      const status = Number(ev.status);
-      if ((Number.isFinite(status) && status !== 0) || st <= Date.now() || (/ended|closed|cancel|abandon|walkover|retired|set \d|live|break|interrupt/i.test(ms) && !/not start/i.test(ms))) return;
+      /* An upcoming fixture must be future-dated AND explicitly prematch. Missing/unknown
+         SportyBet status is not treated as status 0 (the older engine required status 0). */
+      const rawStatus = ev.status;
+      const statusKnown = rawStatus != null && String(rawStatus).trim() !== "" && Number.isFinite(Number(rawStatus));
+      const explicitUpcomingText = /^(not[ _-]?started|scheduled|upcoming|prematch)$/i.test(ms);
+      if ((!statusKnown || Number(rawStatus) !== 0) && !explicitUpcomingText) return;
+      if (statusKnown && Number(rawStatus) !== 0) return;
+      if (st <= Date.now() + 60000) return;
+      if (/(ended|finished|closed|cancel|abandon|walkover|retired|set\s*\d|live|in[ _-]?play|inprogress|break|interrupt|suspend|playing)/i.test(ms) && !/not[ _-]?started|scheduled|upcoming|prematch/i.test(ms)) return;
       const ids = ttSportyIdCandidates(ev);
       if (!ids.length) return;
       const id = ids[0], home = String(ev.homeTeamName || ev.home && ev.home.name || "").trim(), away = String(ev.awayTeamName || ev.away && ev.away.name || "").trim();
@@ -6895,8 +6941,11 @@ async function fetchFixtures(lg, dayOffset) {
             if (!m || !m._id || !m._dt || !m._dt.uts || !m.teams || !m.teams.home || !m.teams.away) return;
             const st = Number(m._dt.uts) * 1000, home = String(m.teams.home.name || "").trim(), away = String(m.teams.away.name || "").trim();
             if (!home || !away || !Number.isFinite(st) || st < s || st >= e || st <= Date.now()) return;
-            if ((m.status && m.status.name && !/^not started$/i.test(m.status.name)) ||
-                (m.matchstatus && m.matchstatus !== "upcoming") ||
+            const statusName = String(m.status && m.status.name || "").trim();
+            const matchStatus = String(m.matchstatus || "").trim().toLowerCase();
+            if ((!/^not started$/i.test(statusName) && matchStatus !== "upcoming") ||
+                (statusName && !/^not started$/i.test(statusName)) ||
+                (matchStatus && matchStatus !== "upcoming") ||
                 m.cancelled || m.walkover || m.postponed || m.removed || m.retired) return;
             const duplicate = [...out.values()].some((x) => {
               const same = (normName(x.home) === normName(home) && normName(x.away) === normName(away)) ||
@@ -7085,14 +7134,22 @@ root.__ttEngineBridge = Object.freeze({
 async function ttPredictCore(f, opts) {
   opts = opts || {};
   const lg = TT_LEAGUES[f.lk], r = { eventId: f.eventId, lk: f.lk, league: lg.name, home: f.home, away: f.away, start: f.start, at: Date.now() };
-  if (f.start <= Date.now()) { r.status = "started"; r.reason = "match has started; prematch predictions are locked"; return r; }
+  if (!Number.isFinite(Number(f.start)) || Number(f.start) <= Date.now() + 60000) { r.status = "started"; r.reason = "match has started or is within the one-minute prematch cutoff"; return r; }
   const ln = await getLines(f);
   if (ln.err) { r.status = ln.started ? "started" : "error"; r.retry = !ln.started; r.reason = ln.err; return r; }
   if (ln.marketsOpen > 0 && !ln.ft && !ln.h1 && !ln.win && !ln.oe) { r.status = "error"; r.retry = true; r.reason = "SportyBet has open requested markets but their prices/specifiers did not pass exact validation"; return r; }
+  if (!ln.ft && !ln.h1 && !ln.win && !ln.oe) {
+    r.status = "noline"; r.retry = true;
+    r.reason = "No requested prematch SportyBet market is open for this fixture yet";
+    return r;
+  }
   r.sig = sigOfData(ln); r.bookEventId = ln.bookEventId || f.bookEventId || "";
   const plan = ttMarketAvailabilityPlan(ln);
-  const bo = Number.isFinite(ln.bo) ? ln.bo : Number.isFinite(f.bo) ? f.bo : defaultBo(lg); r.bo = bo;
-  const L = leagueStats(lg, bo); if (!L) { r.status = "noplay"; r.reason = "no " + lg.name + " data for best-of-" + bo; return r; }
+  const lineBo = Number(ln.bo), fixtureBo = Number(f.bo);
+  const bo = [3, 5, 7].includes(lineBo) ? lineBo : ([3, 5, 7].includes(fixtureBo) ? fixtureBo : defaultBo(lg));
+  r.bo = bo;
+  const L = leagueStats(lg, bo);
+  if (!L) { r.status = "nodata"; r.reason = "No configured history profile for " + lg.name + " best-of-" + (Number.isFinite(bo) ? bo : "unknown"); return r; }
   const H = await histFor(lg);
   if (!H.list.length) { r.status = "noplay"; r.retry = true; r.reason = "no results history loaded"; return r; }
   const hl0 = ttAliasList(H.list, [f.home, f.away]); let hl = hl0; const deep = await ttDeepPair(lg, f.home, f.away); if (deep.length) hl = dedupeMatches(hl0.concat(deep));
@@ -7149,7 +7206,21 @@ async function ttPredictCore(f, opts) {
   r.alts = r.alts.filter((x, i, a) => a.findIndex((y) => candidateKey(y) === candidateKey(x)) === i);
   r.best = r.alts.slice().sort((a, b) => b.pAdj - a.pAdj || (Number(b.ev) || -Infinity) - (Number(a.ev) || -Infinity))[0] || null;
   if (r.alts.length) { r.status = "play"; if (!opts.noTrack) trackIt(r, f, lg, r.alts); }
-  else { r.status = "noplay"; r.reason = legs.map((x) => ((TT_MARKETS[x.mk] || {}).label || x.mk) + ": " + (x.no || (x.projectionOnly ? "PROJECTION ONLY — no active SportyBet line" : "NO PLAY"))).join(" | ").slice(0, 400); if (H.truncated) r.retry = true; }
+  else {
+    const reasons = legs.map((x) => String(x.no || x.reason || ""));
+    const onlyBookDataBlocked = reasons.length > 0 && legs.every((leg, i) => {
+      const reason = reasons[i] || "";
+      const explicitBookDataGap = /market not open|no active SportyBet|no exact prematch price|no fetched SportyBet price|complete SportyBet selection IDs|selection IDs are incomplete/i.test(reason);
+      /* A model-valid leg without a fresh executable price or exact selection identifiers
+         is a missing-book-data condition, not a failed model prediction. */
+      const candidateWithoutBook = !!(leg && leg.pick && leg.pick !== "NO PLAY") &&
+        (!(numericOdds(leg.odds) > 1) || !bookComplete(leg.book));
+      return !!(leg && leg.projectionOnly) || explicitBookDataGap || candidateWithoutBook;
+    });
+    r.status = onlyBookDataBlocked ? "noline" : "noplay";
+    r.retry = !!H.truncated || onlyBookDataBlocked;
+    r.reason = legs.map((x) => ((TT_MARKETS[x.mk] || {}).label || x.mk) + ": " + (x.no || (x.projectionOnly ? "PROJECTION ONLY — no active SportyBet line" : "NO PLAY"))).join(" | ").slice(0, 400);
+  }
   return r;
 }
 function ttProjectionOnlyLeg(mk, proj, side, pSide, reason) {
@@ -7177,13 +7248,14 @@ function ttFreshBookPick(fresh, p) {
 }
 function pendingFor(dk) {
     var order = S.cfg.leagues;
-     
     return Object.keys(S.games).map(function (k) { return S.games[k]; }).filter(function (g) {
-      return g.status === "pending" && g.dayKey === dk && order.indexOf(g.league) >= 0;
+      return g.status === "pending" && g.dayKey === dk && order.indexOf(g.league) >= 0 && ttAutoUpcoming(g);
     }).sort(function (a, b) { return (order.indexOf(a.league) - order.indexOf(b.league)) || ((startMs(a) || 9e15) - (startMs(b) || 9e15)); });
   }
 function scopeGames(dk) {
-    return Object.keys(S.games).map(function (k) { return S.games[k]; }).filter(function (g) { return g.dayKey === dk && S.cfg.leagues.indexOf(g.league) >= 0; });
+    return Object.keys(S.games).map(function (k) { return S.games[k]; }).filter(function (g) {
+      return g.dayKey === dk && S.cfg.leagues.indexOf(g.league) >= 0 && ttAutoUpcoming(g);
+    });
   }
 async function acquireWake() { try { if (navigator.wakeLock && !ctx.wake) { ctx.wake = await navigator.wakeLock.request("screen"); ctx.wake.addEventListener && ctx.wake.addEventListener("release", function () { ctx.wake = null; }); } } catch (e) { ctx.wake = null; } }
 function releaseWake() { try { if (ctx.wake) ctx.wake.release(); } catch (e) {} ctx.wake = null; }
