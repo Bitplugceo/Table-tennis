@@ -1,4 +1,3 @@
-A
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3754,7 +3753,7 @@ body.dark-mode .tracker-analytics-section-head {
    probability + odds/EV gates; median-consistent calibration; deterministic history load; stats/best-of/H2H coherence;
    Unicode-safe name matching; strict series parsing; sample SD; WAT day bounds; tracker stale-pick handling; honest report stats. */
 function isFiniteVal(v) { if (typeof v === "number") return Number.isFinite(v); if (typeof v === "string") return v.trim() !== "" && Number.isFinite(Number(v)); return false; }
-const TT_BUILD = "tt-engine-v1.5-20261113-live-event-id-settlement-fix";
+const TT_BUILD = "tt-engine-v1.6-20261113-event-id-fallback-diagnostics";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
 const WORKER_BASE_URL = WORKER_URL.replace(/\/+$/, "");
 const SR_GISMO = "https://stats.fn.sportradar.com/sportradar/en/Etc:UTC/gismo/";
@@ -3866,12 +3865,15 @@ const TT_WORKER_URL = "https://tt-engine.ridwantunde636.workers.dev";
 const sportyTT = (route, ttl, timeoutMs) => fetchJson(TT_WORKER_URL + "/sporty/tt/" + route, "SportyBet(TT worker)", ttl, timeoutMs).then((j) => { if (!j || j.bizCode !== 10000) throw new Error("SportyBet " + (j && (j.error || j.message) || "bad response")); return j.data; });
 /* SportyBet's displayed numeric match ID is not necessarily the canonical eventId used in a market selection.
    Keep the numeric lookup ID (Worker route) separate from the canonical event reference (market outcomes). */
-function ttAddSportyId(out, value) {
+function ttAddSportyId(out, value, allowSrSuffix) {
   if (value == null) return;
   const s = String(value).trim();
-  /* A Sportradar sr:match:<n> reference is not a verified SportyBet numeric lookup ID.
-     Never strip its prefix and guess that the suffix belongs to SportyBet. */
-  if (/^\d{2,}$/.test(s) && !out.includes(s)) out.push(s);
+  if (/^\d{2,}$/.test(s)) { if (!out.includes(s)) out.push(s); return; }
+  /* Compatibility fallback for older fixture payloads that expose only sr:match:<n>.
+     This suffix is a CANDIDATE only: ttFetchVerifiedPrematchEvent must still verify that
+     the returned SportyBet event has the exact two participants before accepting it. */
+  const m = /^sr:match:(\d+)$/i.exec(s);
+  if (allowSrSuffix && m && !out.includes(m[1])) out.push(m[1]);
 }
 function ttSportyIdCandidates(obj) {
   if (!obj || typeof obj !== "object") return [];
@@ -6729,8 +6731,8 @@ async function discover(league, dk) {
   var fresh = 0;
   z.list.forEach(function (f) {
     var key = league + "|" + f.eventId;
-    if (S.games[key]) { Object.assign(S.games[key], { value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, bo: isFinite(f.bo) ? f.bo : S.games[key].bo }); return; }
-    S.games[key] = { key: key, league: league, leagueLabel: leagueLabel(league), value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, dayKey: dk, status: "pending", at: 0, bo: isFinite(f.bo) ? f.bo : null };
+    if (S.games[key]) { Object.assign(S.games[key], { value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, live: !!f.live, statusText: String(f.statusText || ""), bo: isFinite(f.bo) ? f.bo : S.games[key].bo }); return; }
+    S.games[key] = { key: key, league: league, leagueLabel: leagueLabel(league), value: f.eventId, sportyBetIds: f.sportyBetIds || [f.eventId], bookEventId: f.bookEventId || f.sourceEventId || f.eventId, sourceEventId: f.sourceEventId || "", home: f.home, away: f.away, eventDate: f.start, dayKey: dk, live: !!f.live, statusText: String(f.statusText || ""), status: "pending", at: 0, bo: isFinite(f.bo) ? f.bo : null };
     fresh++;
   });
   S.run.info[league + "|" + dk] = { n: z.list.length, fresh: fresh, at: Date.now(), probed: 1 };
@@ -6741,7 +6743,7 @@ function setErr(g, msg) { g.status = "error"; g.err = String(msg || "failed").sl
 async function predictOne(g) {
   var off = keyToOffset(g.dayKey);
   if (!isFinite(off) || off < 0) { g.status = "gone"; g.err = "Match day already passed"; g.at = Date.now(); return; }
-  if (hasStarted(g)) { g.status = "gone"; g.err = "Already started"; g.at = Date.now(); return; }
+  if (hasStarted(g)) { g.status = "gone"; g.err = g.live ? "LIVE on SportyBet, but Auto Parlay is prematch-only and does not ingest the current score/set state; no live pick generated." : "Already started; prematch predictions are locked."; g.at = Date.now(); return; }
   if (!TT_LEAGUES[g.league]) { setErr(g, "League is not available in the engine"); return; }
   var f = { eventId: g.value, sportyBetIds: g.sportyBetIds || [g.value], bookEventId: g.bookEventId || g.sourceEventId || g.value, sourceEventId: g.sourceEventId || "", home: g.home, away: g.away, start: startMs(g), bo: Number(g.bo), lk: g.league };
   var r = await ttPredictCore(f);
@@ -6838,13 +6840,14 @@ async function fetchFixtures(lg, dayOffset) {
       const nm = normLeagueName((c && c.name || "") + " - " + (c && c.tournament && c.tournament.name || ""));
       const st = ttTimestampMs(ev.estimateStartTime != null ? ev.estimateStartTime : ev.startTime), ms = String(ev.matchStatus || "");
       if (nm !== lg.name || !Number.isFinite(st) || st < s || st >= e) return;
-      const status = Number(ev.status);
-      if ((Number.isFinite(status) && status !== 0) || st <= Date.now() || (/ended|closed|cancel|abandon|walkover|retired|set \d|live|break|interrupt/i.test(ms) && !/not start/i.test(ms))) return;
+      const status = Number(ev.status), live = ttSportyIsLive(ev), statusText = ttSportyStatusText(ev);
+      if (ttSportyIsClosed(ev)) return;
+      if (!live && ((Number.isFinite(status) && status !== 0) || st <= Date.now() || (/ended|closed|cancel|abandon|walkover|retired|set \d|live|break|interrupt/i.test(ms) && !/not start/i.test(ms)))) return;
       const ids = ttSportyIdCandidates(ev); if (!ids.length) return;
       const id = ids[0], home = String(ev.homeTeamName || ev.home && ev.home.name || "").trim(), away = String(ev.awayTeamName || ev.away && ev.away.name || "").trim();
       if (!home || !away || normName(home) === normName(away)) return;
       const bookEventId = ttSportyBookEventRef(ev, ev.eventId || id);
-      out.set(id, { eventId: id, sportyBetIds: ids, bookEventId, sourceEventId: String(ev.eventId || ""), home, away, start: st, bo: NaN, src: "SportyBet" });
+      out.set(id, { eventId: id, sportyBetIds: ids, bookEventId, sourceEventId: String(ev.eventId || ""), home, away, start: st, live: live, statusText: statusText, bo: NaN, src: "SportyBet" });
     }));
   } catch (er) { errs.push(lg.name + ": " + (er && er.message || er)); }
   return { list: [...out.values()], errs };
@@ -7022,7 +7025,7 @@ root.__ttEngineBridge = Object.freeze({
 async function ttPredictCore(f, opts) {
   opts = opts || {};
   const lg = TT_LEAGUES[f.lk], r = { eventId: ttCanonicalPickEventId(f), sportyBetEventId: String(f.eventId || ""), bookEventId: String(f.bookEventId || ""), lk: f.lk, league: lg.name, home: f.home, away: f.away, start: f.start, at: Date.now() };
-  if (f.start <= Date.now()) { r.status = "started"; r.reason = "match has started; prematch predictions are locked"; return r; }
+  if (f.start <= Date.now()) { r.status = "started"; r.reason = "match has started; prematch predictions are locked because the model does not ingest the live score/set state"; return r; }
   const ln = await getLines(f);
   if (ln.err) { r.status = ln.started ? "started" : "error"; r.retry = !ln.started; r.reason = ln.err; return r; }
   if (ln.marketsOpen > 0 && !ln.ft && !ln.h1 && !ln.win && !ln.oe) { r.status = "error"; r.retry = true; r.reason = "SportyBet has open requested markets but their prices/specifiers did not pass exact validation"; return r; }
@@ -7412,20 +7415,62 @@ function renderAllGames(dk, c) {
     
 
     function liveStatusRows() {
-      if (!ctx.running || ctx.fullView === true) return [];
-      return all.filter(function (g) {
+      if (ctx.fullView === true) return [];
+      var hasSavedDiagnostics = !!(c && (c.error || c.nodata || c.noline || c.gone));
+      if (!ctx.running && !hasSavedDiagnostics) return [];
+      var statusItems = all.filter(function (g) {
         return g && ["pending", "error", "nodata", "noline", "gone"].indexOf(g.status) >= 0;
-      }).map(function (g) {
+      });
+      if (!ctx.running) {
+        var priority = { error: 0, nodata: 1, noline: 2, pending: 3, gone: 4 };
+        statusItems.sort(function (a, b) {
+          var byStatus = priority[a.status] - priority[b.status];
+          if (byStatus) return byStatus;
+          if (a.status === "gone" && b.status === "gone" && !!a.live !== !!b.live) return a.live ? -1 : 1;
+          return (startMs(a) - startMs(b));
+        });
+      }
+      var limit = ctx.running ? 50 : 30;
+      var shownItems = statusItems.slice(0, limit);
+      var rows = shownItems.map(function (g) {
         var st = g.status === "pending" ? "PENDING" : g.status === "error" ? "ERROR" : g.status === "noline" ? "NO LINES — SKIPPED" : g.status === "gone" ? "DROPPED" : "NO DATA";
         return '<tr class="apStatusRow"><td>' + esc(fmtTime(g)) + '</td><td>' + esc(g.leagueLabel || g.league || '—') + '</td><td>'
           + esc((g.home || '?') + ' vs ' + (g.away || '?')) + '</td><td colspan="4" style="opacity:.65">' + st
           + (g.err ? ' · ' + esc(g.err) : '') + '</td><td>—</td></tr>';
       });
+      if (statusItems.length > limit) {
+        rows.push('<tr class="apStatusRow"><td colspan="8" style="font-weight:800;text-align:center">+' + (statusItems.length - limit) + ' more status rows not shown</td></tr>');
+      }
+      return rows;
     }
     var liveRows = liveStatusRows();
+    var failureBuckets = {};
+    all.forEach(function (g) {
+      if (!g || g.status !== "error") return;
+      var reason = String(g.err || "Unknown error").trim() || "Unknown error";
+      failureBuckets[reason] = (failureBuckets[reason] || 0) + 1;
+    });
+    var failureSummary = Object.keys(failureBuckets).map(function (reason) {
+      return { reason: reason, count: failureBuckets[reason] };
+    }).sort(function (a, b) { return b.count - a.count; });
+    var diagnosticHtml = "";
+    if (!ctx.running && failureSummary.length) {
+      diagnosticHtml = '<div class="apNote" style="margin:8px 0 12px;padding:12px;border:1px solid #d92d2a;background:rgba(217,45,42,.06);border-radius:8px">'
+        + '<b>Prediction failure report · ' + failureSummary.reduce(function (n, x) { return n + x.count; }, 0) + ' failed</b>'
+        + '<div style="margin-top:7px;font-size:12px;line-height:1.5">'
+        + failureSummary.slice(0, 5).map(function (x) { return '<div><b>' + x.count + '×</b> ' + esc(x.reason) + '</div>'; }).join("")
+        + (failureSummary.length > 5 ? '<div style="opacity:.7">+' + (failureSummary.length - 5) + ' other error reasons</div>' : '')
+        + '</div><div style="margin-top:7px;font-size:11px;opacity:.75">The rows below show individual affected fixtures and their stored error messages.</div></div>';
+    }
+    var liveSkipped = all.filter(function (g) { return g && g.live === true && g.status === "gone"; });
+    if (!ctx.running && liveSkipped.length) {
+      diagnosticHtml += '<div class="apNote" style="margin:8px 0 12px;padding:10px;border-left:3px solid #d49b22">'
+        + '<b>' + liveSkipped.length + ' live match(es) detected and skipped.</b> Auto Parlay is prematch-only: it does not use current points, set score or serve state, so it will not invent an in-play pick.'
+        + '<div style="margin-top:5px;font-size:12px">' + liveSkipped.slice(0, 4).map(function (g) { return esc((g.home || "?") + " vs " + (g.away || "?")); }).join(" · ") + '</div></div>';
+    }
     if (!groups.length && !liveRows.length) {
       ctx.tableSel = [];
-      wrap.innerHTML = '<div class="apEmpty">No picks available.</div>';
+      wrap.innerHTML = diagnosticHtml + '<div class="apEmpty">No picks available.</div>';
       return;
     }
 
@@ -7460,7 +7505,7 @@ function renderAllGames(dk, c) {
     if (ctx.fullView !== true && liveRows.length) rows.push.apply(rows, liveRows);
      
     var countHead = (ctx.fullView !== true && groups.length) ? '<div class="apSectionTitle">Plays · ' + groups.length + '</div>' : '';
-    wrap.innerHTML = countHead + '<div class="apTblWrap"><table id="apAllTbl"' + (ctx.fullView === true ? ' class="apFull"' : '') + '><thead><tr>'
+    wrap.innerHTML = diagnosticHtml + countHead + '<div class="apTblWrap"><table id="apAllTbl"' + (ctx.fullView === true ? ' class="apFull"' : '') + '><thead><tr>'
       + '<th>Time</th><th>League</th><th>Match</th><th>Market</th><th>Line</th><th>Pick</th><th>Grade</th><th>Win%</th>'
       + '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
   }
@@ -8077,7 +8122,7 @@ function init() {
     hydrateFromIdb();
     setInterval(function () { try { var m = $("apModal"); if (m && m.classList.contains("open") && !ctx.running) { render(); } } catch (e) {} }, 60000);  
   }
-root.TTAutoParlay = { _state: function () { return S; }, drawLeagues: drawLeagues, ttLeaguesForDay: ttLeaguesForDay, leagueTier: leagueTier, buildTrackRecord: buildTrackRecord, calibrate: calibrate, candKey: candKey, oddsKey: oddsKey, parlayText: parlayText, slipStats: slipStats, CAL: CAL, open: openPanel, isFullPlay: isFullPlay, bestOfGame: bestOfGame, selectLock: ttSelectLock, selectParlay: selectParlay, selectParlayEx: selectParlayEx, oddsOf: oddsOf, pickLabel: pickLabel, marketLabel: marketLabel, renderParlay: function () { return renderParlay(); }, _t: { load: function () { S = load(); return S; }, state: function () { return S; }, runLoop: runLoop, ctx: ctx, predictOne: predictOne, predictCore: ttPredictCore, discover: discover, pendingFor: pendingFor, dayKeyOf: dayKeyOf, clearAll: clearAll, forgetAll: forgetAll, recheckSaved: recheckSaved, sigOfData: sigOfData, sigChanged: sigChanged, renderBook: renderBook, scanDay: scanDay } };
+root.TTAutoParlay = { _state: function () { return S; }, drawLeagues: drawLeagues, ttLeaguesForDay: ttLeaguesForDay, leagueTier: leagueTier, buildTrackRecord: buildTrackRecord, calibrate: calibrate, candKey: candKey, oddsKey: oddsKey, parlayText: parlayText, slipStats: slipStats, CAL: CAL, open: openPanel, isFullPlay: isFullPlay, bestOfGame: bestOfGame, selectLock: ttSelectLock, selectParlay: selectParlay, selectParlayEx: selectParlayEx, oddsOf: oddsOf, pickLabel: pickLabel, marketLabel: marketLabel, renderParlay: function () { return renderParlay(); }, _t: { load: function () { S = load(); return S; }, state: function () { return S; }, diagnostics: function (dk) { var rows = scopeGames(dk || dayKeyOf(S.cfg.day)).filter(function (g) { return g && g.status === "error"; }); return rows.map(function (g) { return { league: g.league, match: String(g.home || "?") + " vs " + String(g.away || "?"), id: g.value, sportyBetIds: g.sportyBetIds, error: g.err || "Unknown error" }; }); }, runLoop: runLoop, ctx: ctx, predictOne: predictOne, predictCore: ttPredictCore, discover: discover, pendingFor: pendingFor, dayKeyOf: dayKeyOf, clearAll: clearAll, forgetAll: forgetAll, recheckSaved: recheckSaved, sigOfData: sigOfData, sigChanged: sigChanged, renderBook: renderBook, scanDay: scanDay } };
   root.TTAP = root.TTAutoParlay;
 if (typeof document !== "undefined" && document.addEventListener) { if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init(); }
 })(typeof window !== "undefined" ? window : globalThis);
