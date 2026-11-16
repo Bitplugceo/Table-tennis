@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <!-- TN-BLK-001 START | RANGE=3-8424 | CODE_LINES=7690 | SHARE=99.96% | NAME=complete-engine-physical-coverage | CLASS=ENGINE-WIDE-COVERAGE -->
@@ -4614,7 +4615,7 @@ function ttBookSelection(eventId, market, outcome) {
   if (!spec.trim() && Number(market.id) !== 186) return null;
   return { eventId: String(eventId), marketId: String(market.id), specifier: spec, outcomeId: String(oid) };
 }
-/* ---------------- SportyBet lines (238 total, 247 first-set total, 186 winner, 248 first-set odd/even) ---------------- */
+/* ---------------- Auto Parlay uses SportyBet Total Points (238) and 1st Set Total Points (247) only. ---------------- */
 function pickMainLine(markets, id, gameOne, eventId) {
   const cands = (markets || []).filter((m) => Number(m.id) === Number(id) && String(m.status == null ? 0 : m.status) === "0").filter((m) => {
     const sp = String(m.specifier || "").toLowerCase().replace(/[;,]/g, "|");
@@ -4953,6 +4954,14 @@ function ttExpectedOpenMarketIssues(markets, parsed) {
   if (open(247, (sp) => gameOne(sp) && /(^|\|)total\s*=/.test(sp)) && !parsed.h1) out.push("1st Set Total Points");
   if (open(186, (sp) => !sp.trim()) && !parsed.win) out.push("Winner");
   if (open(248, gameOne) && !parsed.oe) out.push("1st Set Odd/Even");
+  return out;
+}
+function ttExpectedOpenTotalMarketIssues(markets, parsed) {
+  const open = (id, test) => (Array.isArray(markets) ? markets : []).some((m) => Number(m.id) === id && String(m.status == null ? 0 : m.status) === "0" && (!test || test(String(m.specifier || "").toLowerCase().replace(/[;,]/g, "|"))));
+  const gameOne = (sp) => /(^|\|)gamenr\s*=\s*1(\||$)/.test(sp) || /(^|\|)game(?:nr|number)\s*=\s*1(\||$)/.test(sp);
+  const out = [];
+  if (open(238, (sp) => /(^|\|)total\s*=/.test(sp)) && !parsed.ft) out.push("Full-game Total Points");
+  if (open(247, (sp) => gameOne(sp) && /(^|\|)total\s*=/.test(sp)) && !parsed.h1) out.push("1st Set Total Points");
   return out;
 }
 function ttWinnerPredictionRow(side, winnerName, probability, reason) {
@@ -6478,7 +6487,16 @@ function load(srcObj) {
     if (!s.run.info || typeof s.run.info !== "object") s.run.info = {};
      
     var cutoff = dayKeyOf(-1);
-    Object.keys(s.games).forEach(function (k) { var g = s.games[k]; if (!g || !g.dayKey || String(g.dayKey) < cutoff) delete s.games[k]; });
+    Object.keys(s.games).forEach(function (k) {
+      var g = s.games[k];
+      if (!g || !g.dayKey || String(g.dayKey) < cutoff) { delete s.games[k]; return; }
+      delete g.prediction; /* Winner-only prediction rows are permanently retired from Auto Parlay. */
+      if (g.best && ["ft", "h1"].indexOf(String(g.best.marketKey || g.best.mk || "").toLowerCase()) < 0) {
+        g.best = null; g.status = "pending"; g.at = 0; g.err = "";
+      }
+      if (Array.isArray(g.alts)) g.alts = g.alts.filter(function (x) { return x && ["ft", "h1"].indexOf(String(x.marketKey || x.mk || "").toLowerCase()) >= 0; });
+      if (g.status === "play" && !g.best) g.status = "pending";
+    });
      
      
     Object.keys(s.odds).forEach(function (k) {
@@ -6489,7 +6507,8 @@ function load(srcObj) {
         if (lg && lg.best && v > 1) { var nk = k + ODDS_SEP + candKey(lg.best); if (!(Number(s.odds[nk]) > 1)) s.odds[nk] = v; }
         delete s.odds[k]; return;
       }
-      if (!s.games[k.slice(0, at)] || !(v > 1)) delete s.odds[k];
+      var pickKey = k.slice(at + ODDS_SEP.length);
+      if (!s.games[k.slice(0, at)] || !(v > 1) || /^(?:win|oe)\|/i.test(pickKey)) delete s.odds[k];
     });
     return s;
   }
@@ -6556,13 +6575,15 @@ var GRADE_RANK = { "A": 8, "B": 5 };
 function gradeRank(g) { var k = normGrade(g); return GRADE_RANK[k] != null ? GRADE_RANK[k] : 0; }
 function abGrade(g) { var k = normGrade(g); return k === "A" || k === "B"; } /* the parlay accepts grade A and B only, nothing else */
 function isFullPlay(p) {
-  var mk = String(p && p.mk || "");
-  var total = (mk === "ft" || mk === "h1") && isFiniteVal(p && p.line), noLine = (mk === "win" || mk === "oe") && !isFiniteVal(p && p.line);
-  return !!(p && !p.projectionOnly && p.pick && p.pick !== "NO PLAY" && (total || noLine) && isFiniteVal(p.pSide) && Number(p.pSide) > 0 && Number(p.pSide) < 1 && (p.grade === "A" || p.grade === "B") && numericOdds(p.odds) > 1 && bookComplete(p.book) && ["ft", "h1", "win", "oe"].indexOf(mk) >= 0);
+  var mk = String(p && p.mk || p && p.marketKey || "").toLowerCase();
+  return !!(p && !p.projectionOnly && (mk === "ft" || mk === "h1") && isFiniteVal(p.line) &&
+    p.pick && p.pick !== "NO PLAY" && isFiniteVal(p.pSide) && Number(p.pSide) > 0 && Number(p.pSide) < 1 &&
+    (p.grade === "A" || p.grade === "B") && numericOdds(p.odds) > 1 && bookComplete(p.book));
 }
 function strength(p) { var s = Number(p && p.pSide); return isFinite(s) ? s : NaN; }
 function candFromPick(p, s, lock) {
-  var mk = String(p.mk || ""), total = mk === "ft" || mk === "h1", k = p.book;
+  var mk = String(p.mk || p.marketKey || "").toLowerCase(), total = mk === "ft" || mk === "h1", k = p.book;
+  if (!total) return null;
   var bk = k && k.eventId != null && k.marketId != null && k.outcomeId != null && (String(k.specifier == null ? "" : k.specifier).trim() || String(k.marketId) === "186")
     ? { eventId: String(k.eventId), marketId: String(k.marketId), specifier: String(k.specifier == null ? "" : k.specifier), outcomeId: String(k.outcomeId) } : null;
   return {
@@ -6595,7 +6616,7 @@ function leagueTier(lk) {
   var d = lg && leagueStats(lg, defaultBo(lg)), t = String(d && d.tier || "").toUpperCase();
   return t === "A" ? 3 : t === "B" ? 2 : t === "C" ? 1 : (t === "X" || t === "D") ? 0 : 1;
 }
-function marketFamily(mk) { return ({ ft: "match_total", h1: "first_set_total", win: "winner", oe: "odd_even" })[String(mk || "").toLowerCase()] || "other"; }
+function marketFamily(mk) { return ({ ft: "match_total", h1: "first_set_total" })[String(mk || "").toLowerCase()] || "other"; }
 var CAL = { K: 30, MIN_LEVEL_N: 5, MAX_ADJ: 0.06, TIE: 0.005, TRUST_N: 40 };
 var TIER_PEN = { 3: 0, 2: 0.005, 1: 0.015, 0: 0.03 };
 function normLg(v) { try { if (typeof normalizeLeagueKey === "function") return normalizeLeagueKey(v); } catch (e) {} return String(v || "").toLowerCase().trim(); }
@@ -6823,7 +6844,7 @@ function pickLabel(b, g) {
   }
 function marketLabel(b, g) { return String(b && b.market || (TT_MARKETS[String(b && b.marketKey || "").toLowerCase()] || {}).label || ""); }
 function ttlMs() { return S && S.cfg && S.cfg.ttlH > 0 ? S.cfg.ttlH * 3600000 : 0; }
-function isStale(g) { var t = ttlMs(); return !!t && !!g && (g.status === "play" || g.status === "noplay" || g.status === "prediction") && g.at > 0 && (Date.now() - g.at) > t; }
+function isStale(g) { var t = ttlMs(); return !!t && !!g && (g.status === "play" || g.status === "noplay") && g.at > 0 && (Date.now() - g.at) > t; }
 function autoOddsOf(g, c) { c = c || (g && g.best); var o = Number(c && c.odds); return isFinite(o) && o > 1 ? o : NaN; }
 function manualOddsOf(g, c) { var o = Number(S && S.odds && S.odds[oddsKey(g, c)]); return isFinite(o) && o > 1 ? o : NaN; }
 function oddsOf(g, c) { var m = manualOddsOf(g, c); return isFinite(m) ? m : autoOddsOf(g, c); }
@@ -6839,7 +6860,20 @@ function allEnsureList(force) {
   var tok = ++_allTok; _allErr = ""; _allLoading = true; _allT0 = Date.now(); allStopTimer();
   _allTimer = setInterval(function () { var el = $("apLeagueCount"); if (_allLoading && el) el.textContent = "Loading… " + Math.round((Date.now() - _allT0) / 1000) + "s"; }, 1000);
   drawLeagues(allSearchText());
-  var done = function (err) { if (tok !== _allTok) return; _allLoading = false; _allErr = err ? String(err && err.message || err) : ""; allStopTimer(); drawLeagues(allSearchText()); };
+  var done = function (err) {
+    if (tok !== _allTok) return;
+    _allLoading = false; _allErr = err ? String(err && err.message || err) : ""; allStopTimer();
+    if (!_allErr) {
+      var activeDay = dayKeyOf(S.cfg.day);
+      seedAvailableGames(activeDay);
+      if (S.cfg.allMode) {
+        var available = ttLeaguesForDay(activeDay);
+        S.cfg.leagues = Object.keys(available.leagues).sort();
+      }
+      save(); render();
+    }
+    drawLeagues(allSearchText());
+  };
   try { scanDay(dayKeyOf(S.cfg.day), !!force).then(function () { done(null); }, function (e) { done(e || "SportyBet list failed"); }); } catch (e) { done(e); }
 }
 function allPrefetch() { try { if (!spFresh() && !ctx.running) { var p = scanDay(dayKeyOf(S.cfg.day), false); if (p && p.catch) p.catch(function () {}); } } catch (e) {} }
@@ -6924,7 +6958,7 @@ async function discover(league, dk) {
   var lg = TT_LEAGUES[league]; if (!lg) throw new Error("League not available in the engine");
   var z = await fetchFixtures(lg, off);
   if (!z.list.length && z.errs && z.errs.length) throw new Error(String(z.errs[0]).slice(0, 100));
-  var fresh = 0, upcoming = z.list.filter(function (f) { return ttUpcomingFixture(f); });
+  var fresh = 0, checked = await filterTotalMarketFixtures(z.list, false), upcoming = checked.list;
   upcoming.forEach(function (f) {
     var key = league + "|" + f.eventId;
     var fbo = ttValidBestOf(f.bo);
@@ -6935,8 +6969,11 @@ async function discover(league, dk) {
         bookEventId: f.bookEventId || f.sourceEventId || f.eventId,
         sourceEventId: f.sourceEventId || "", fixtureSource: f.src || "SportyBet",
         home: f.home, away: f.away, eventDate: f.start,
-        bo: Number.isFinite(fbo) ? fbo : oldBo
+        bo: Number.isFinite(fbo) ? fbo : oldBo,
+        availableMarkets: f.availableMarkets || S.games[key].availableMarkets || null,
+        marketCheckedAt: f.marketCheckedAt || Date.now()
       });
+      delete S.games[key].prediction;
       return;
     }
     S.games[key] = {
@@ -6945,11 +6982,12 @@ async function discover(league, dk) {
       bookEventId: f.bookEventId || f.sourceEventId || f.eventId,
       sourceEventId: f.sourceEventId || "", fixtureSource: f.src || "SportyBet",
       home: f.home, away: f.away, eventDate: f.start, dayKey: dk,
-      status: "pending", at: 0, bo: Number.isFinite(fbo) ? fbo : null
+      status: "pending", at: 0, bo: Number.isFinite(fbo) ? fbo : null,
+      availableMarkets: f.availableMarkets || null, marketCheckedAt: f.marketCheckedAt || Date.now()
     };
     fresh++;
   });
-  S.run.info[league + "|" + dk] = { n: upcoming.length, fresh: fresh, at: Date.now(), probed: 1 };
+  S.run.info[league + "|" + dk] = { n: upcoming.length, fresh: fresh, marketCheckErrors: checked.errors, at: Date.now(), probed: 1 };
   try { availableMap(dk)[league] = upcoming.length; } catch (e) {}
   return upcoming.length;
 }
@@ -6981,8 +7019,8 @@ async function predictOne(g) {
   }
   g.lineErr = r.lineLookupError || "";
   var legs = Array.isArray(r.legs) ? r.legs : [];
-  g.prediction = r.winnerPrediction ? { marketKey: "win", market: "Winner", side: r.winnerPrediction.side,
-    pick: r.winnerPrediction.pick, win: Number(r.winnerPrediction.win), reason: String(r.winnerPrediction.reason || "") } : null;
+  g.availableMarkets = r.availableMarkets || g.availableMarkets || null;
+  delete g.prediction; /* Auto Parlay no longer creates or displays Winner predictions. */
   delete g.projections; /* remove legacy projection-only rows */
   g.lineStatus = r.lineLookupError ? "unverified" : (r.sig ? "loaded" : "no-open-markets");
   g.sig = r.sig || null; g.sbId = String(g.value); g.chk = Date.now();
@@ -6996,13 +7034,8 @@ async function predictOne(g) {
     g.status = "play"; g.best = res.best; g.alts = res.alts && res.alts.length ? res.alts : [res.best];
   } else {
     g.best = null; g.alts = [];
-    if (g.prediction) {
-      g.status = "prediction";
-      g.err = String(g.prediction.reason || "Winner prediction available; no active winner line.").slice(0, 160);
-    } else {
-      g.status = "noplay";
-      g.err = String(r.reason || "No actionable pick cleared the engine's own eligibility rules").slice(0, 160);
-    }
+    g.status = "noplay";
+    g.err = String(r.reason || "No Total Points or 1st Set Total Points pick cleared the engine's eligibility rules").slice(0, 160);
   }
 }
 function normGrade(g) { var k = String(g == null ? "" : g).trim().toUpperCase(); return k === "NAN" ? "" : k; }
@@ -7013,8 +7046,7 @@ function h2hPass(p) { return !!(p && p.h2hEvidence && p.h2hEvidence.status === "
 function ttSelectLock(plays) {
   var valid = (plays || []).filter(function (p) { return isFullPlay(p) && isFinite(strength(p)); });
   if (!valid.length) return null;
-  var nonWinner = valid.filter(function (p) { return String(p.mk) !== "win"; });
-  var pool = valid.length >= 2 && nonWinner.length ? nonWinner : valid;
+  var pool = valid;
   if (pool.length === 1) return pool[0];
   return pool.reduce(function (a, b) {
     var ap = strength(a), bp = strength(b);
@@ -7028,6 +7060,10 @@ function ttSelectLock(plays) {
   });
 }
 var HC = {}, lastRawOdds = null, LCACHE = {}, LTTL = 300000;
+/* Auto Parlay eligibility is based only on a verified, open SportyBet Total Points (238)
+   or 1st Set Total Points (247) line. This short cache is shared by the league picker
+   and the later discovery pass so they use the same market snapshot. */
+var AP_MARKET_CACHE = Object.create(null), AP_MARKET_TTL = 45000;
 var tick = function () { return new Promise(function (r) { setTimeout(r, 0); }); };
 function bookComplete(k) { return !!(k && k.eventId && k.marketId && k.outcomeId && (String(k.specifier == null ? "" : k.specifier).trim() || String(k.marketId) === "186")); }
 function fetchT(url, init, ms) {
@@ -7035,6 +7071,53 @@ function fetchT(url, init, ms) {
   return fetch(url, Object.assign({}, init || {}, { signal: ctl.signal })).finally(function () { clearTimeout(to); });
 }
 function leagueCacheFresh(dk) { var c = LCACHE[dk]; return !!(c && Date.now() - c.at < LTTL); }
+function autoMarketCacheKey(f) {
+  var ids = (Array.isArray(f && f.sportyBetIds) ? f.sportyBetIds : []).concat([f && f.eventId, f && f.bookEventId, f && f.sourceEventId]);
+  return ids.map(function (x) { return String(x == null ? "" : x).trim(); }).filter(Boolean).join("|") || String(f && f.home || "") + "|" + String(f && f.away || "");
+}
+async function autoTotalMarketStatus(f, fresh) {
+  var key = autoMarketCacheKey(f), cached = AP_MARKET_CACHE[key];
+  if (!fresh && cached && Date.now() - cached.at < AP_MARKET_TTL) return cached.value;
+  var checked = await ttFetchVerifiedPrematchEvent(f, !!fresh);
+  if (!checked || !checked.ev) {
+    var fail = { eligible: false, availableMarkets: { ft: false, h1: false }, error: String(checked && checked.err || "SportyBet market verification failed"), transient: !!(checked && checked.transient) };
+    if (!fail.transient) AP_MARKET_CACHE[key] = { at: Date.now(), value: fail };
+    return fail;
+  }
+  var markets = Array.isArray(checked.ev.markets) ? checked.ev.markets : [];
+  var ft = pickMainLine(markets, 238, false, checked.bookEventId);
+  var h1 = pickMainLine(markets, 247, false, checked.bookEventId);
+  var ftOk = !!(ft && Number.isFinite(Number(ft.line)) && Number(ft.over) > 1 && Number(ft.under) > 1);
+  var h1Ok = !!(h1 && Number.isFinite(Number(h1.line)) && Number(h1.over) > 1 && Number(h1.under) > 1);
+  var value = {
+    eligible: ftOk || h1Ok,
+    availableMarkets: { ft: ftOk, h1: h1Ok },
+    ftLine: ftOk ? Number(ft.line) : null,
+    h1Line: h1Ok ? Number(h1.line) : null,
+    bookEventId: String(checked.bookEventId || ""),
+    checkedAt: Date.now(),
+    error: "", transient: false
+  };
+  AP_MARKET_CACHE[key] = { at: Date.now(), value: value };
+  return value;
+}
+async function filterTotalMarketFixtures(fixtures, fresh) {
+  var input = (Array.isArray(fixtures) ? fixtures : []).filter(function (f) { return ttUpcomingFixture(f); });
+  var out = [], errors = 0, i = 0;
+  async function lane() {
+    while (i < input.length) {
+      var f = input[i++];
+      try {
+        var state = await autoTotalMarketStatus(f, !!fresh);
+        if (state.eligible) out.push(Object.assign({}, f, { availableMarkets: state.availableMarkets, marketCheckedAt: state.checkedAt || Date.now() }));
+        else if (state.error) errors++;
+      } catch (_e) { errors++; }
+    }
+  }
+  await Promise.all([lane(), lane(), lane(), lane(), lane(), lane()]);
+  out.sort(function (a, b) { return Number(a.start) - Number(b.start); });
+  return { list: out, errors: errors, checked: input.length };
+}
 async function scanDay(dk, force, onProgress) {
   if (!force && leagueCacheFresh(dk)) return LCACHE[dk];
   var off = keyToOffset(dk); if (!isFinite(off) || off < 0) throw new Error("That day has already passed");
@@ -7050,15 +7133,100 @@ async function scanDay(dk, force, onProgress) {
   await Promise.all([lane(), lane(), lane(), lane(), lane(), lane()]);
   var bad = Object.keys(errs).length;
   if (lgs.length && bad >= lgs.length) throw new Error(errs[Object.keys(errs)[0]] || "fixture sources unreachable");
-  LCACHE[dk] = { at: Date.now(), lists: lists, errs: errs };
+
+  /* Only keep fixtures with an exact, active prematch Total Points or 1st Set Total Points
+     line and prices. Booking selection IDs are checked again before a prediction can enter the parlay.
+     A locked or unparsable full-match total never disqualifies a verified open first-set total. */
+  var marketJobs = [];
+  Object.keys(lists).forEach(function (lk) {
+    (lists[lk] || []).forEach(function (f) { marketJobs.push({ league: lk, fixture: f }); });
+  });
+  var marketDone = 0, marketIndex = 0, filtered = {};
+  async function marketLane() {
+    while (marketIndex < marketJobs.length) {
+      var job = marketJobs[marketIndex++];
+      try {
+        var state = await autoTotalMarketStatus(job.fixture, !!force);
+        if (state.eligible) {
+          (filtered[job.league] || (filtered[job.league] = [])).push(Object.assign({}, job.fixture, { availableMarkets: state.availableMarkets, marketCheckedAt: state.checkedAt || Date.now() }));
+        } else if (state.error) {
+          errs[job.league] = (errs[job.league] ? errs[job.league] + "; " : "") + "some market checks unavailable";
+        }
+      } catch (_e) {
+        errs[job.league] = (errs[job.league] ? errs[job.league] + "; " : "") + "some market checks unavailable";
+      }
+      marketDone++;
+      if (onProgress && marketJobs.length) { try { onProgress(lgs.length + marketDone, lgs.length + marketJobs.length); } catch (_e) {} }
+    }
+  }
+  await Promise.all([marketLane(), marketLane(), marketLane(), marketLane(), marketLane(), marketLane()]);
+  Object.keys(lists).forEach(function (lk) { lists[lk] = (filtered[lk] || []).sort(function (a, b) { return Number(a.start) - Number(b.start); }); });
+  LCACHE[dk] = { at: Date.now(), lists: lists, errs: errs, checkedFixtures: marketJobs.length };
+  try {
+    var available = {};
+    Object.keys(lists).forEach(function (lk) { if (lists[lk].length) available[lk] = lists[lk].length; });
+    if (S && S.run) S.run.available[dk] = available;
+  } catch (_e) {}
   return LCACHE[dk];
+}
+function seedAvailableGames(dk) {
+  var cache = LCACHE[dk];
+  if (!cache || !S || !S.games) return 0;
+  var keep = Object.create(null), seeded = 0;
+  Object.keys(cache.lists || {}).forEach(function (lk) {
+    if (!TT_LEAGUES[lk]) return;
+    (cache.lists[lk] || []).forEach(function (f) {
+      if (!f || !ttUpcomingFixture(f)) return;
+      var key = lk + "|" + String(f.eventId || "");
+      if (!f.eventId) return;
+      keep[key] = 1;
+      var g = S.games[key] || (S.games[key] = {
+        key: key, league: lk, leagueLabel: leagueLabel(lk), value: String(f.eventId),
+        home: f.home, away: f.away, eventDate: f.start, dayKey: dk,
+        status: "pending", at: 0, bo: null, best: null, alts: []
+      });
+      var oldBo = ttValidBestOf(g.bo);
+      var newBo = ttValidBestOf(f.bo);
+      Object.assign(g, {
+        key: key, league: lk, leagueLabel: leagueLabel(lk), value: String(f.eventId),
+        sportyBetIds: f.sportyBetIds || [f.eventId],
+        bookEventId: f.bookEventId || f.sourceEventId || f.eventId,
+        sourceEventId: f.sourceEventId || "", fixtureSource: f.src || "SportyBet",
+        home: f.home, away: f.away, eventDate: f.start, dayKey: dk,
+        bo: Number.isFinite(newBo) ? newBo : oldBo,
+        availableMarkets: f.availableMarkets || { ft: false, h1: false },
+        marketCheckedAt: f.marketCheckedAt || Date.now()
+      });
+      if (g.best && ["ft", "h1"].indexOf(String(g.best.marketKey || g.best.mk || "").toLowerCase()) < 0) {
+        g.best = null; g.alts = []; g.status = "pending"; g.at = 0;
+      }
+      if (Array.isArray(g.alts)) g.alts = g.alts.filter(function (x) { return x && ["ft", "h1"].indexOf(String(x.marketKey || x.mk || "").toLowerCase()) >= 0; });
+      if (["gone", "noline", "error", "nodata"].indexOf(g.status) >= 0) { g.status = "pending"; g.err = ""; g.at = 0; }
+      if (g.status === "play" && !g.best) g.status = "pending";
+      delete g.prediction;
+      seeded++;
+    });
+  });
+  /* Remove expired/closed matches from the live page snapshot. Keep a league's old rows
+     only when that league's SportyBet request failed, rather than treating a network error
+     as proof that its markets have closed. */
+  Object.keys(S.games).forEach(function (key) {
+    var g = S.games[key];
+    if (!g || g.dayKey !== dk || keep[key]) return;
+    if (cache.errs && cache.errs[g.league]) return;
+    delete S.games[key];
+  });
+  return seeded;
 }
 function ttLeaguesForDay(dk) {
   var c = LCACHE[dk], res = { leagues: {}, unmatched: [], total: 0, failedPages: [], at: c ? c.at : null };
   if (!c) return res;
   Object.keys(c.lists).forEach(function (k) {
-    var n = (c.lists[k] || []).filter(function (f) { return ttUpcomingFixture(f); }).length;
-    if (n > 0 && TT_LEAGUES[k]) { res.leagues[k] = n; res.total += n; }
+    var fixtures = (c.lists[k] || []).filter(function (f) { return ttUpcomingFixture(f); }), n = fixtures.length;
+    if (!n) return;
+    res.total += n;
+    if (TT_LEAGUES[k]) res.leagues[k] = n;
+    else res.unmatched.push({ name: String(k), count: n });
   });
   res.failedPages = Object.keys(c.errs);
   return res;
@@ -7160,12 +7328,13 @@ async function getLines(f, fresh) {
   let bo = NaN;
   const bm = markets.find((m) => (Number(m.id) === 199 || Number(m.id) === 241) && /bestof:(\d)/.test(String(m.specifier || "")));
   if (bm) { const v = Number(String(bm.specifier).match(/bestof:(\d)/)[1]); if ([3, 5, 7].includes(v)) bo = v; }
-  const rawMarkets = markets.filter((m) => [186, 238, 247, 248, 199, 241].includes(Number(m.id))).map((m) => ({ id: m.id, desc: m.desc || m.name || "", specifier: m.specifier || "", status: m.status, odds: m.odds || m.outcomes || m.prices || null }));
+  const rawMarkets = markets.filter((m) => [238, 247, 199, 241].includes(Number(m.id))).map((m) => ({ id: m.id, desc: m.desc || m.name || "", specifier: m.specifier || "", status: m.status, odds: m.odds || m.outcomes || m.prices || null }));
   lastRawOdds = { eventId: String(f.eventId), bookEventId: eventRef, home: ev.homeTeamName || f.home || "", away: ev.awayTeamName || f.away || "", fetchedAt: Date.now(), markets: rawMarkets };
-  const _wanted = markets.filter((m) => [186, 238, 247, 248].includes(Number(m.id))), _open = _wanted.filter((m) => String(m.status == null ? 0 : m.status) === "0");
-  const lines = { ft: pickMainLine(markets, 238, false, eventRef), h1: pickMainLine(markets, 247, false, eventRef), win: ttWinnerOdds(markets, f.home, f.away, result.identity.orientationVerified, eventRef), oe: ttOddEvenOdds(markets, eventRef), bo, raw: lastRawOdds, marketsPresent: _wanted.length, marketsOpen: _open.length, openIds: _open.map((m) => Number(m.id) + (String(m.specifier || "") ? "[" + String(m.specifier).slice(0, 40) + "]" : "")).slice(0, 6).join(", "), lookupId: result.id, bookEventId: eventRef, verified: true };
-  const parseIssues = ttExpectedOpenMarketIssues(markets, lines);
-  if (parseIssues.length) return { err: "SportyBet has open market(s) that could not be parsed exactly: " + parseIssues.join(", ") + ". Retry; do not treat these markets as absent or generate selections from incomplete market data.", transient: true };
+  const _wanted = markets.filter((m) => [238, 247].includes(Number(m.id))), _open = _wanted.filter((m) => String(m.status == null ? 0 : m.status) === "0");
+  const lines = { ft: pickMainLine(markets, 238, false, eventRef), h1: pickMainLine(markets, 247, false, eventRef), bo, raw: lastRawOdds, marketsPresent: _wanted.length, marketsOpen: _open.length, openIds: _open.map((m) => Number(m.id) + (String(m.specifier || "") ? "[" + String(m.specifier).slice(0, 40) + "]" : "")).slice(0, 6).join(", "), lookupId: result.id, bookEventId: eventRef, verified: true };
+  const parseIssues = ttExpectedOpenTotalMarketIssues(markets, lines);
+  if (parseIssues.length && !lines.ft && !lines.h1) return { err: "SportyBet has open total market(s) that could not be parsed exactly: " + parseIssues.join(", ") + ". Retry; no total selection was generated from incomplete market data.", transient: true };
+  if (parseIssues.length) lines.marketWarning = "Other open total market not used because it could not be parsed exactly: " + parseIssues.join(", ");
   return lines;
 }
 function histFor(lg) {
@@ -7176,7 +7345,7 @@ function histFor(lg) {
 }
 function guard(lg, f) {
   const day = watDayKey(f.start), nA = normName(f.home), nB = normName(f.away), pair = [nA, nB].sort().join("|"), out = {};
-  ["ft", "h1", "win", "oe"].forEach((mk) => {
+  ["ft", "h1"].forEach((mk) => {
     const same = g_tracker.picks.filter((p) => !p.lean && p.resultStatus !== "void" && p.marketKey === mk && (p.leagueKey || leagueKeyOf(p.league)) === lg.key && watDayKey(p.eventDate || p.createdAt) === day && p.eventId !== f.eventId);
     const names = (p) => [normName(p.homeTeam), normName(p.awayTeam)];
     const pairN = same.filter((p) => names(p).slice().sort().join("|") === pair).length, plA = same.filter((p) => names(p).includes(nA)).length, plB = same.filter((p) => names(p).includes(nB)).length;
@@ -7309,7 +7478,12 @@ async function ttPredictCore(f, opts) {
     if (ln.started) { r.status = "started"; r.reason = ln.err; return r; }
     r.status = "error"; r.retry = !!ln.transient; r.reason = ln.err; return r;
   }
-  if (ln.marketsOpen > 0 && !ln.ft && !ln.h1 && !ln.win && !ln.oe) { r.status = "error"; r.retry = true; r.reason = "SportyBet has open requested markets but their prices/specifiers did not pass exact validation"; return r; }
+  lineLookupError = String(ln.marketWarning || "");
+  if (!ln.ft && !ln.h1) {
+    r.status = "noline"; r.reason = "No active, verified SportyBet Total Points or 1st Set Total Points line.";
+    r.availableMarkets = { ft: false, h1: false }; return r;
+  }
+  r.availableMarkets = { ft: !!ln.ft, h1: !!ln.h1 };
   r.lineLookupError = lineLookupError;
   r.sig = sigOfData(ln); r.bookEventId = ln.bookEventId || f.bookEventId || "";
   const eventBo = ttValidBestOf(ln.bo), fixtureBo = ttValidBestOf(f.bo);
@@ -7340,45 +7514,11 @@ async function ttPredictCore(f, opts) {
   };
   pushTotal("ft"); pushTotal("h1");
 
-  const pA = ttWinnerProbability(model, bo), winSide = pA >= 0.5 ? "HOME" : "AWAY", winProb = Math.max(pA, 1 - pA), winPick = winSide === "HOME" ? f.home : f.away;
-  if (!ln.win) {
-    r.winnerPrediction = { mk: "win", market: TT_MARKETS.win.label, side: winSide, pick: winPick, pSide: winProb, win: winProb,
-      reason: "No active SportyBet winner line; normal match prediction is " + winSide + " — " + winPick + " (" + fmtPct(winProb) + ")." };
-  } else {
-    const field = winSide === "HOME" ? "home" : "away";
-    const w = ttSpecialLeg("win", winSide, winPick, winProb, ln.win[field], recentFormSamples, h2, NaNv, ln.win[field + "Book"]);
-    if (!cg.win && !blk && !w.no && (w.grade === "A" || w.grade === "B") && bookComplete(w.book)) { w.pick = winPick; w.odds = Number(ln.win[field]); legs.push(w); }
-    else {
-      legs.push({ mk: "win", no: cg.win || blk || w.no || "Winner selection did not pass the exact-price / Grade A-B requirements" });
-    }
-  }
-
-  {
-    const dist = model.hidden && model.hidden.d1 ? model.hidden.d1 : model.s1d, parity = ttSetParityProb(dist);
-    if (!parity) legs.push({ mk: "oe", no: "first-set parity distribution unavailable" });
-    else if (!ln.oe) {
-      /* No active first-set odd/even line: do not create a separate forecast row. */
-    } else {
-      const evaluated = ["ODD", "EVEN"].map((side) => {
-        const key = side.toLowerCase(), w = ttSpecialLeg("oe", side, side, parity[key], ln.oe[key], recentFormSamples, h2, NaNv, ln.oe[key + "Book"]);
-        return Object.assign(w, { odds: Number(ln.oe[key]) });
-      });
-      const playable = evaluated.filter((w) => !w.no && (w.grade === "A" || w.grade === "B") && bookComplete(w.book));
-      if (playable.length) legs.push(playable.sort((a,b) => Number(b.ev || -Infinity) - Number(a.ev || -Infinity))[0]);
-      else {
-        const preferred = parity.odd >= parity.even ? "ODD" : "EVEN", bad = evaluated.find((x) => x.side === preferred) || evaluated[0];
-        legs.push({ mk: "oe", no: bad.no || "No first-set Odd/Even side passed the betting rules" });
-      }
-    }
-  }
   r.legs = legs; r.alts = legs.filter(isFullPlay);
   r.alts = r.alts.filter((x, i, a) => a.findIndex((y) => candidateKey(y) === candidateKey(x)) === i);
   r.best = r.alts.slice().sort((a, b) => b.pAdj - a.pAdj || (Number(b.ev) || -Infinity) - (Number(a.ev) || -Infinity))[0] || null;
   if (r.alts.length) { if (f.start <= Date.now()) { r.status = "started"; r.reason = "match started while the prediction was computed; prematch picks are locked"; return r; } r.status = "play"; if (!opts.noTrack) trackIt(r, f, lg, r.alts); }
-  else if (r.winnerPrediction) {
-    r.status = "prediction";
-    r.reason = r.winnerPrediction.reason + (lineLookupError ? " Market lookup note: " + lineLookupError : "");
-  } else {
+  else {
     r.status = "noplay";
     r.reason = lineLookupError
       ? "SportyBet market lookup could not be verified: " + lineLookupError
@@ -7387,10 +7527,9 @@ async function ttPredictCore(f, opts) {
   }
   return r;
 }
-function ttWinnerPredictionDisplay(g) {
-  var p = g && g.prediction;
-  if (!p || !p.pick || !p.side || !fin(p.win)) return null;
-  return { marketKey: "win", market: "Winner", side: p.side, pick: p.pick, win: Number(p.win), grade: "—", predictionOnly: true };
+function autoAvailableMarketLabel(g) {
+  var m = g && g.availableMarkets || {};
+  return [m.ft ? "Total Points" : "", m.h1 ? "1st Set Total Points" : ""].filter(Boolean).join(" / ") || "Total Points / 1st Set Total Points";
 }
 function ttSameBookSelection(a, b) {
   return !!(a && b && String(a.eventId) === String(b.eventId) && String(a.marketId) === String(b.marketId) && String(a.specifier) === String(b.specifier) && String(a.outcomeId) === String(b.outcomeId));
@@ -7401,14 +7540,7 @@ function ttFreshBookPick(fresh, p) {
     const x = fresh[p.mk]; if (!x || Number(x.line) !== Number(p.line)) return null;
     return { odds: numericOdds(p.side === "OVER" ? x.over : x.under), book: p.side === "OVER" ? x.overBook : x.underBook };
   }
-  if (p.mk === "win") {
-    const field = p.side === "HOME" ? "home" : "away", x = fresh.win;
-    return x ? { odds: numericOdds(x[field]), book: x[field + "Book"] } : null;
-  }
-  if (p.mk === "oe") {
-    const field = String(p.side || "").toLowerCase(), x = fresh.oe;
-    return x ? { odds: numericOdds(x[field]), book: x[field + "Book"] } : null;
-  }
+  /* Auto Parlay books only Total Points and 1st Set Total Points. */
   return null;
 }
 /* TN-JS-0026 END */
@@ -7436,8 +7568,6 @@ function sigOfData(ln) {
     if (!ln || ln.err) return null;
     var out = {}, n = 0;
     ["ft", "h1"].forEach(function (k) { var o = ln[k]; if (o && isFinite(Number(o.line))) { out[k] = [Number(o.line), fin(o.over) ? Number(o.over) : null, fin(o.under) ? Number(o.under) : null]; n++; } });
-    if (ln.win) { out.win = [null, fin(ln.win.home) ? Number(ln.win.home) : null, fin(ln.win.away) ? Number(ln.win.away) : null]; n++; }
-    if (ln.oe) { out.oe = [null, fin(ln.oe.odd) ? Number(ln.oe.odd) : null, fin(ln.oe.even) ? Number(ln.oe.even) : null]; n++; }
     return n ? out : null;
   } catch (e) { return null; }
 }
@@ -7459,7 +7589,7 @@ function sigChanged(a, b) {
 async function recheckSaved(dk) {
   var now = Date.now(), todo = [], reBook = 0, rePrice = 0;
   scopeGames(dk).forEach(function (g) {
-    if (!g || (g.status !== "play" && g.status !== "noplay" && g.status !== "prediction") || hasStarted(g)) return;
+    if (!g || (g.status !== "play" && g.status !== "noplay") || hasStarted(g)) return;
     if (g.status === "play" && g.best && !g.best.book && !g.bkTried) { g.status = "pending"; g.bkTried = 1; reBook++; return; }
     if (g.status === "play" && g.best && g.ptried !== AP_PV && !isFinite(autoOddsOf(g, g.best))) { g.status = "pending"; g.ptried = AP_PV; rePrice++; return; }
     if (g.chk > 0 && now - g.chk < AP_RECHECK_MS) return;
@@ -7485,7 +7615,6 @@ async function recheckSaved(dk) {
           if (g.sig) { g.sig = null; g.status = "pending"; g.err = ""; g.prediction = null; st.changed++; }
         } else if (!g.sig) {
           g.sig = sig; if (!g.sbId) g.sbId = String(id);
-          if (g.status === "prediction") { g.status = "pending"; g.err = ""; g.prediction = null; st.changed++; }
         } else if (sigChanged(g.sig, sig)) { g.status = "pending"; g.err = ""; g.prediction = null; st.changed++; }
       } catch (e) { st.failed++; if (g.sbId) streak++; }
       st.done++;
@@ -7508,7 +7637,7 @@ async function runLoop(fresh) {
   scopeGames(dk).forEach(function (g) { if (g && g.status === "projection") { g.status = "pending"; g.prediction = null; delete g.projections; } });
   if (fresh) {
     S.run.discovered = {};
-    scopeGames(dk).forEach(function (g) { if (["error", "nodata", "noline", "prediction", "noplay", "gone"].indexOf(g.status) >= 0) { g.status = "pending"; g.err = ""; g.prediction = null; } });
+    scopeGames(dk).forEach(function (g) { if (["error", "nodata", "noline", "noplay", "gone"].indexOf(g.status) >= 0) { g.status = "pending"; g.err = ""; delete g.prediction; } });
   }
   scopeGames(dk).forEach(function (g) { if (isStale(g)) { g.status = "pending"; } });
   S.run.active = true; save(); render(); acquireWake();
@@ -7546,7 +7675,7 @@ async function runLoop(fresh) {
 }
 function pauseRun() { ctx.want = false; S.run.active = false; save(); render(); }
 function counts(dk) {
-    var c = { total: 0, play: 0, prediction: 0, noplay: 0, nodata: 0, noline: 0, error: 0, pending: 0, gone: 0, stale: 0 };
+    var c = { total: 0, play: 0, noplay: 0, nodata: 0, noline: 0, error: 0, pending: 0, gone: 0, stale: 0 };
     scopeGames(dk).forEach(function (g) { c.total++; if (c[g.status] != null) c[g.status]++; if (isStale(g)) c.stale++; });
      
     return c;
@@ -7595,7 +7724,7 @@ function render() {
         status.innerHTML = "<b>" + pct + "%</b> · " + done + "/" + c.total + " processed · ✅ " + c.play + " play · ⛔ " + c.noplay + " no play"
           + (c.pending ? " · ⏳ " + c.pending + " left" : "")
           + (c.nodata ? " · ⚠ " + c.nodata + " no data" : "")
-          + (c.prediction ? " · 🏓 " + c.prediction + " winner predictions" : "") + (c.noline ? " · ⏭ " + c.noline + " no active markets" : "") + (c.gone ? " · 🚫 " + c.gone + " dropped (started / not in match list)" : "")
+          + (c.noline ? " · ⏭ " + c.noline + " no active total markets" : "") + (c.gone ? " · 🚫 " + c.gone + " dropped (started / not in match list)" : "")
           + (c.error ? " · ❌ " + c.error + " failed" : "");
       }   else if (running && !c.total) {
         status.innerHTML = "<b>…</b> Discovering games in selected leagues…";
@@ -7603,14 +7732,14 @@ function render() {
          
         status.innerHTML = "<b>" + pct + "%</b> · " + done + "/" + c.total + " processed · ✅ " + c.play + " play · ⛔ " + c.noplay + " no play"
           + (c.nodata ? " · ⚠ " + c.nodata + " no data" : "")
-          + (c.prediction ? " · 🏓 " + c.prediction + " winner predictions" : "") + (c.noline ? " · ⏭ " + c.noline + " no active markets" : "") + (c.gone ? " · 🚫 " + c.gone + " dropped (started / not in match list)" : "")
+          + (c.noline ? " · ⏭ " + c.noline + " no active total markets" : "") + (c.gone ? " · 🚫 " + c.gone + " dropped (started / not in match list)" : "")
           + (c.error ? " · ❌ " + c.error + " failed" : "")
           + (c.stale ? " · 🕒 " + c.stale + " stale" : "")
           + (ctx.chkNote ? " · 🔄 " + ctx.chkNote : "");
       }   else if (ctx.lastErr) {
         status.textContent = "Error: " + ctx.lastErr;
       }   else {
-        status.textContent = S.cfg.leagues.length ? "Ready — tap Predict to scan selected leagues." : "Choose leagues and tap Predict.";
+        status.textContent = S.cfg.leagues.length ? "Ready — tap Predict to scan active Total Points / 1st Set markets." : "Loading available leagues and active total markets…";
       }
     }
     var bar = $("apBar") && $("apBar").querySelector("i");
@@ -7634,14 +7763,6 @@ function render() {
 function lineOf(b, g) {
   if (!b) return "—";
   var mk = String(b.marketKey || "").toLowerCase();
-  if (mk === "win") {
-    var side = String(b.side || "").toUpperCase();
-    if (side === "HOME" || side === "AWAY") return side;
-    if (g && String(b.pick || "").trim() === String(g.home || "").trim()) return "HOME";
-    if (g && String(b.pick || "").trim() === String(g.away || "").trim()) return "AWAY";
-    return "—";
-  }
-  if (mk === "oe") return String(b.side || b.pick || "—").toUpperCase();
   if (b.line != null && isFinite(Number(b.line))) return String(b.line);
   var m = String(b.pick || "").match(/-?\d+(?:\.\d+)?/g);
   return m && m.length ? m[m.length - 1] : "—";
@@ -7658,7 +7779,7 @@ function dirPick(b) {
 function renderAllGames(dk, c) {
     var wrap = $("apAllWrap"); if (!wrap) return;
     var all = scopeGames(dk).slice();
-    if (!all.length) { ctx.tableSel = []; wrap.innerHTML = '<div class="apEmpty">No games scanned yet for this day.</div>'; return; }
+    if (!all.length) { ctx.tableSel = []; wrap.innerHTML = '<div class="apEmpty">No upcoming matches currently have a verified Total Points or 1st Set Total Points market.</div>'; return; }
 
     function candidates(g) {
       
@@ -7671,6 +7792,7 @@ function renderAllGames(dk, c) {
         var c = v.c && typeof v.c === "object" ? Object.assign({}, v.c) :
           (v.pick && typeof v === "object" ? Object.assign({}, v) : null);
         if (!c) return;
+        if (["ft", "h1"].indexOf(String(c.marketKey || c.mk || "").toLowerCase()) < 0) return;
         if (!fin(c.win) && fin(v.p)) c.win = Number(v.p);
         var legacyGrade = String(c.grade || c.confidenceDisplay || c.confidence || c.confidenceGrade || "").trim();
         var normalizedLegacyGrade = normGrade(legacyGrade);
@@ -7728,18 +7850,18 @@ function renderAllGames(dk, c) {
 
     
 
-    function liveStatusRows() {
-      if (!ctx.running || ctx.fullView === true) return [];
+    function availableMarketRows() {
       return all.filter(function (g) {
-        return g && ["pending", "error", "nodata", "noline", "gone"].indexOf(g.status) >= 0;
-      }).map(function (g) {
-        var st = g.status === "pending" ? "PENDING" : g.status === "error" ? "ERROR" : g.status === "noline" ? "NO ACTIVE MARKETS" : g.status === "gone" ? "DROPPED" : "NO DATA";
+        return g && g.status !== "play" && g.availableMarkets && (g.availableMarkets.ft || g.availableMarkets.h1);
+      }).sort(function (a, b) { return (startMs(a) || 9e15) - (startMs(b) || 9e15); }).map(function (g) {
+        var st = g.status === "pending" ? "PENDING" : g.status === "error" ? "CHECK FAILED" : g.status === "noline" ? "MARKET CLOSED" : g.status === "gone" ? "DROPPED" : g.status === "nodata" ? "NO MODEL DATA" : "NO PLAY";
+        var why = g.err ? " · " + esc(g.err) : "";
         return '<tr class="apStatusRow"><td>' + esc(fmtTime(g)) + '</td><td>' + esc(g.leagueLabel || g.league || '—') + '</td><td>'
-          + esc((g.home || '?') + ' vs ' + (g.away || '?')) + '</td><td colspan="4" style="opacity:.65">' + st
-          + (g.err ? ' · ' + esc(g.err) : '') + '</td><td>—</td></tr>';
+          + esc((g.home || '?') + ' vs ' + (g.away || '?')) + '</td><td>' + esc(autoAvailableMarketLabel(g)) + '</td><td>—</td><td>' + st + why
+          + '</td><td>—</td><td>—</td></tr>';
       });
     }
-    var liveRows = liveStatusRows();
+    var marketRows = availableMarketRows();
 
     function row(it, g, isBackup, rank, pickCount) {
       var b = it;
@@ -7768,23 +7890,14 @@ function renderAllGames(dk, c) {
       }
     });
 
-    var predictionRows = [];
-    all.forEach(function (g) {
-      var pred = !hasStarted(g) ? ttWinnerPredictionDisplay(g) : null;
-      if (pred) predictionRows.push(row(pred, g, false, 0, 0));
-    });
-    if (!groups.length && !liveRows.length && !predictionRows.length) {
+    if (marketRows.length) rows.push.apply(rows, marketRows);
+    if (!groups.length && !marketRows.length) {
       ctx.tableSel = [];
-      wrap.innerHTML = '<div class="apEmpty">No picks or winner predictions available.</div>';
+      wrap.innerHTML = '<div class="apEmpty">No upcoming matches currently have a verified Total Points or 1st Set Total Points market.</div>';
       return;
     }
-    if (predictionRows.length) {
-      rows.push('<tr class="apStatusRow"><td colspan="8" style="font-weight:800">WINNER PREDICTIONS · NO ACTIVE WINNER LINE</td></tr>');
-      rows.push.apply(rows, predictionRows);
-    }
-    if (ctx.fullView !== true && liveRows.length) rows.push.apply(rows, liveRows);
 
-    var countHead = (ctx.fullView !== true && groups.length) ? '<div class="apSectionTitle">Plays · ' + groups.length + '</div>' : '';
+    var countHead = '<div class="apSectionTitle">Matches with active total markets · ' + (groups.length + marketRows.length) + '</div>';
     wrap.innerHTML = countHead + '<div class="apTblWrap"><table id="apAllTbl"' + (ctx.fullView === true ? ' class="apFull"' : '') + '><thead><tr>'
       + '<th>Time</th><th>League</th><th>Match</th><th>Market</th><th>Line</th><th>Pick</th><th>Grade</th><th>Win%</th>'
       + '</tr></thead><tbody>' + rows.join('') + '</tbody></table></div>';
@@ -8261,8 +8374,8 @@ function drawLeagues(q) {
     q = String(q || "").toLowerCase().trim();
     drawLeaguesAll(q);
   }
-function setLeague(v, on) { var i = S.cfg.leagues.indexOf(v); if (on && i < 0) S.cfg.leagues.push(v); if (!on && i >= 0) S.cfg.leagues.splice(i, 1); }
-function openPanel() { var m = $("apModal"); m.classList.add("open"); m.setAttribute("aria-hidden", "false"); render(); renderParlay(); try { allPrefetch(); } catch (e) {} }
+function setLeague(v, on) { var i = S.cfg.leagues.indexOf(v); if (on && i < 0) S.cfg.leagues.push(v); if (!on && i >= 0) S.cfg.leagues.splice(i, 1); S.cfg.allMode = false; }
+function openPanel() { var m = $("apModal"); m.classList.add("open"); m.setAttribute("aria-hidden", "false"); render(); renderParlay(); try { allEnsureList(true); } catch (e) {} }
 function closePanel() { var m = $("apModal"); m.classList.remove("open"); m.setAttribute("aria-hidden", "true"); render(); try { if (typeof renderTracker === "function") renderTracker(); } catch (e) {} }
 function clearAll() {  
     ctx.want = false; S.cfg = freshCfg(); S.run.active = false; S.run.discovered = {}; S.run.info = {}; S.run.available = {}; ctx.lastErr = "";
@@ -8387,10 +8500,14 @@ function bind() {
     $("apLeagueAll").addEventListener("click", function () {
       var boxes = $("apLeagueList").querySelectorAll("input");
       if (!boxes.length) return;
+      S.cfg.allMode = true;
+      S.cfg.leagues = [];
       Array.prototype.forEach.call(boxes, function (cb) { cb.checked = true; setLeague(cb.value, true); });
+      S.cfg.allMode = true;
       save(); updateLeagueCount();
     });
     $("apLeagueNone").addEventListener("click", function () {
+      S.cfg.allMode = false;
       S.cfg.leagues = [];
       Array.prototype.forEach.call($("apLeagueList").querySelectorAll("input"), function (cb) { cb.checked = false; });
       save(); updateLeagueCount();
